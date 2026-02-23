@@ -86,6 +86,7 @@ poetry run ruff format
 - Always try to return `Iterator` instead of `list` from a function call to make functions faster
 - For long runnign for loops, use `tqdm` and `tqdm_loggable.auto` module for progress bar. As an example, see `lead_scan_core.py`.
 - For visualusations, use Plotly. For chart titles, use heading case as explained above.
+- Use module level imports, not function level lazy imports, whenever possible
 
 ### Code comments
 
@@ -128,6 +129,7 @@ poetry run ruff format
 - For DuckDB testing, make sure the database is always closed using finally clause or fixtures
 - Always use fixture and test functions, never use test classes
 - For Anvil mainnet fork based tests, whici use a fixed block number, in asserts check for absolute number values instead of relative values like above zero, because values never change
+- For reuseable testing code, use `testing` modules under `eth_defi` - do not nyt try to import "tests" as it does not work with pytest
 
 ### pyproject.toml
 
@@ -189,6 +191,12 @@ source .local-test.env && make build-docs
 ```
 
 Never directly edit auto-generated sphinx files in `_autosummary*` folders.
+
+## ERC-20
+
+- Don't do hardcoded token decimal multiply, use `TokenDetails.convert_to_raw()`
+- Use `TokenDetails.transfer()` and similar - do not do raw ERC-20 contract calls unless needed
+- Use `eth_defi.hotwallet.HotWallet` for deployer accounts and signing transactions when possible
 
 ## Web Fetching and 403
 

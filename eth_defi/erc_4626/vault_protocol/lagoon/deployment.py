@@ -14,6 +14,7 @@ Any Safe must be deployed as 1-of-1 deployer address multisig and multisig holde
 import logging
 import os
 import time
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from decimal import Decimal
 from io import StringIO
@@ -23,30 +24,6 @@ from typing import Any, Callable, Literal
 
 import eth_abi
 from eth_account.signers.local import LocalAccount
-from eth_defi.aave_v3.deployment import AaveV3Deployment
-from eth_defi.abi import ZERO_ADDRESS_STR, encode_multicalls, get_deployed_contract
-from eth_defi.cow.constants import COWSWAP_SETTLEMENT, COWSWAP_VAULT_RELAYER
-from eth_defi.cctp.whitelist import CCTPDeployment
-from eth_defi.gmx.whitelist import GMXDeployment
-from eth_defi.velora.api import get_augustus_swapper, get_token_transfer_proxy
-from eth_defi.deploy import deploy_contract
-from eth_defi.erc_4626.vault import ERC4626Vault
-from eth_defi.erc_4626.vault_protocol.lagoon.beacon_proxy import deploy_beacon_proxy
-from eth_defi.erc_4626.vault_protocol.lagoon.vault import LagoonVault
-from eth_defi.foundry.forge import deploy_contract_with_forge
-from eth_defi.gas import apply_gas, estimate_gas_price
-from eth_defi.hotwallet import HotWallet
-from eth_defi.orderly.vault import OrderlyVault
-from eth_defi.provider.anvil import is_anvil
-from eth_defi.safe.deployment import add_new_safe_owners, deploy_safe, deploy_safe_with_deterministic_address, fetch_safe_deployment
-from eth_defi.safe.execute import execute_safe_tx
-from eth_defi.token import WRAPPED_NATIVE_TOKEN, fetch_erc20_details, get_wrapped_native_token_address
-from eth_defi.trace import assert_transaction_success_with_explanation
-from eth_defi.tx import get_tx_broadcast_data
-from eth_defi.uniswap_v2.deployment import UniswapV2Deployment
-from eth_defi.uniswap_v3.deployment import UniswapV3Deployment
-from eth_defi.utils import chunked
-from eth_defi.vault.base import VaultSpec
 from eth_typing import BlockNumber, HexAddress
 from hexbytes import HexBytes
 from safe_eth.safe.safe import Safe
@@ -54,6 +31,36 @@ from web3 import Web3
 from web3._utils.events import EventLogErrorFlags
 from web3.contract import Contract
 from web3.contract.contract import ContractFunction
+
+from eth_defi.aave_v3.deployment import AaveV3Deployment
+from eth_defi.abi import (ZERO_ADDRESS, ZERO_ADDRESS_STR, encode_multicalls,
+                          get_deployed_contract)
+from eth_defi.cctp.whitelist import CCTPDeployment
+from eth_defi.cow.constants import COWSWAP_SETTLEMENT, COWSWAP_VAULT_RELAYER
+from eth_defi.deploy import build_guard_forge_libraries, deploy_contract
+from eth_defi.erc_4626.vault import ERC4626Vault
+from eth_defi.erc_4626.vault_protocol.lagoon.beacon_proxy import \
+    deploy_beacon_proxy
+from eth_defi.erc_4626.vault_protocol.lagoon.vault import LagoonVault
+from eth_defi.foundry.forge import deploy_contract_with_forge
+from eth_defi.gas import apply_gas, estimate_gas_price
+from eth_defi.gmx.whitelist import GMXDeployment
+from eth_defi.hotwallet import HotWallet
+from eth_defi.orderly.vault import OrderlyVault
+from eth_defi.provider.anvil import is_anvil
+from eth_defi.safe.deployment import (add_new_safe_owners, deploy_safe,
+                                      deploy_safe_with_deterministic_address,
+                                      fetch_safe_deployment)
+from eth_defi.safe.execute import execute_safe_tx
+from eth_defi.token import (WRAPPED_NATIVE_TOKEN, fetch_erc20_details,
+                            get_wrapped_native_token_address)
+from eth_defi.trace import assert_transaction_success_with_explanation
+from eth_defi.tx import get_tx_broadcast_data
+from eth_defi.uniswap_v2.deployment import UniswapV2Deployment
+from eth_defi.uniswap_v3.deployment import UniswapV3Deployment
+from eth_defi.utils import chunked
+from eth_defi.vault.base import VaultSpec
+from eth_defi.velora.api import get_augustus_swapper, get_token_transfer_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +287,10 @@ class LagoonConfig:
     #: Deploy fresh Lagoon protocol (fee registry + vault implementation + factory)
     from_the_scratch: bool = False
 
+    #: Hypercore native vault addresses to whitelist (HyperEVM only).
+    #: When set, also whitelists CoreWriter and CoreDepositWallet.
+    hypercore_vaults: list[HexAddress | str] | None = None
+
     #: ERC-20 token addresses to whitelist
     assets: list[HexAddress | str] | None = None
 
@@ -320,6 +331,12 @@ class LagoonAutomatedDeployment:
     #: How much ETH deployment used
     gas_used: Decimal | None = None
 
+    #: Salt nonce used for deterministic Safe proxy deployment.
+    #:
+    #: Recorded so the deployment can be reproduced or debugged later.
+    #: ``None`` when deployed without a deterministic address (e.g. from-scratch testnet).
+    safe_salt_nonce: int | None = None
+
     @property
     def safe(self) -> Safe:
         return self.vault.safe
@@ -351,6 +368,7 @@ class LagoonAutomatedDeployment:
             "Management fee": f"{self.parameters.managementRate / 100:,} %",
             "ABI": self.vault_abi,
             "Gas used": float(self.gas_used),
+            "Safe salt nonce": self.safe_salt_nonce,
         }
 
         return fields
@@ -708,7 +726,7 @@ def deploy_lagoon(
                 logger.info(
                     "Transacting with factory contract %s.createVaultProxy() with args %s",
                     beacon_proxy_factory_address,
-                    args,
+                    [args[0], "0x" + salt.hex()],
                 )
                 bound_func = beacon_proxy_factory.functions.createVaultProxy(*args)
             case "lagoon/OptinProxyFactory.json":
@@ -724,7 +742,7 @@ def deploy_lagoon(
                 logger.info(
                     "Transacting with OptinBeaconFactory contract %s.createVaultProxy() with args %s",
                     beacon_proxy_factory_address,
-                    args,
+                    [*args[:-1], "0x" + salt.hex()],
                 )
                 bound_func = beacon_proxy_factory.functions.createVaultProxy(
                     *args,
@@ -780,13 +798,20 @@ def deploy_safe_trading_strategy_module(
     verifier: Literal["etherscan", "blockscout", "sourcify", "oklink"] | None = None,
     verifier_url: str | None = None,
     enable_on_safe=True,
+    cowswap: bool = False,
+    gmx_deployment: GMXDeployment | None = None,
 ) -> Contract:
     """Deploy TradingStrategyModuleV0 for Safe and Lagoon.
+
+    On HyperEVM chains, automatically enables big blocks only for the
+    TradingStrategyModuleV0 deployment (~5.4M gas). Library deployments
+    (CowSwapLib, GmxLib, HypercoreVaultLib) fit in small blocks and
+    are deployed without toggling.
 
     :param use_forge:
         Deploy Etherscan verified build with Forge
 
-    :parma enable_on_safe:
+    :param enable_on_safe:
         Automatically enable this module on the Safe multisig.
         Must be 1-of-1 deployer address multisig.
 
@@ -797,40 +822,100 @@ def deploy_safe_trading_strategy_module(
     logger.info("Deploying TradingStrategyModuleV0")
 
     owner = deployer.address
+    chain_id = web3.eth.chain_id
+    library_addresses = {}
 
-    # Deploy guard module
+    # NOTE: ``forge create`` does not support dynamic library linking, so we
+    # always use the pre-compiled ABI path (non-Forge) for TradingStrategyModuleV0.
+    # The caller (``deploy_automated_lagoon_vault``) enforces ``use_forge=False``.
     if use_forge:
-        # Unit test path
-        if verifier == "etherscan" and etherscan_api_key is None:
-            verifier = None
-
-        module, tx_hash = deploy_contract_with_forge(
-            web3,
-            CONTRACTS_ROOT / "safe-integration",
-            "TradingStrategyModuleV0.sol",
-            "TradingStrategyModuleV0",
-            deployer,
-            [owner, safe.address],
-            etherscan_api_key=etherscan_api_key,
-            verifier=verifier,
-            verifier_url=verifier_url,
-        )
+        raise NotImplementedError("forge create does not support dynamic library linking. Use use_forge=False for TradingStrategyModuleV0 deployment.")
     else:
         # Use explicit gas to skip eth_estimateGas (very slow on HyperEVM Anvil fork).
         # HyperEVM dual-block architecture: small blocks have only 2–3M gas limit,
         # while large blocks allow 30M. TradingStrategyModuleV0 needs ~5.4M gas.
+        # On HyperEVM, eth_getBlock("latest") may return a small block's gas limit
+        # even when the deployer has big blocks enabled, so we use the known big
+        # block gas limit constant instead.
         # https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm/dual-block-architecture
-        block_gas_limit = web3.eth.get_block("latest")["gasLimit"]
-        guard_gas = min(10_000_000, block_gas_limit - 100_000)
-        module = deploy_contract(
-            web3,
-            "safe-integration/TradingStrategyModuleV0.json",
-            deployer,
-            owner,
-            safe.address,
-            gas=guard_gas,
-        )
+        from eth_defi.hyperliquid.block import (HYPEREVM_BIG_BLOCK_GAS_LIMIT,
+                                                is_hyperevm)
 
+        if is_hyperevm(chain_id):
+            block_gas_limit = HYPEREVM_BIG_BLOCK_GAS_LIMIT
+        else:
+            block_gas_limit = web3.eth.get_block("latest")["gasLimit"]
+        guard_gas = min(10_000_000, block_gas_limit - 100_000)
+
+        # TradingStrategyModuleV0 uses external Forge libraries via DELEGATECALL:
+        # - CowSwapLib: CowSwap order creation/signing
+        # - GmxLib: GMX perpetuals validation
+        # - HypercoreVaultLib: Hypercore vault validation (HyperEVM only)
+        # Libraries not needed by this deployment are linked to zero address.
+        chain_id = web3.eth.chain_id
+
+        library_addresses = {}
+
+        if cowswap:
+            cowswap_lib = deploy_contract(
+                web3,
+                "guard/CowSwapLib.json",
+                deployer,
+                gas=guard_gas,
+            )
+            library_addresses["CowSwapLib"] = cowswap_lib.address
+            logger.info("Deployed CowSwapLib at %s", cowswap_lib.address)
+        else:
+            library_addresses["CowSwapLib"] = ZERO_ADDRESS
+            logger.info("CowSwapLib not needed, linking with zero address")
+
+        if gmx_deployment:
+            gmx_lib = deploy_contract(
+                web3,
+                "guard/GmxLib.json",
+                deployer,
+                gas=guard_gas,
+            )
+            library_addresses["GmxLib"] = gmx_lib.address
+            logger.info("Deployed GmxLib at %s", gmx_lib.address)
+        else:
+            library_addresses["GmxLib"] = ZERO_ADDRESS
+            logger.info("GmxLib not needed, linking with zero address")
+
+        if chain_id in (998, 999):  # Both testnet (998) and mainnet (999)
+            # Only deploy if not already deployed via Forge
+            logger.info("Deploying HypercoreVaultLib for HyperEVM chain %d", chain_id)
+            if "HypercoreVaultLib" not in library_addresses:
+                from eth_defi.hyperliquid.block import big_blocks_for_deployment as _big_blocks
+                with _big_blocks(web3, deployer.key.hex()):
+                    hypercore_lib = deploy_contract(
+                        web3,
+                        "guard/HypercoreVaultLib.json",
+                        deployer,
+                        gas=guard_gas,
+                    )
+                library_addresses["HypercoreVaultLib"] = hypercore_lib.address
+                logger.info("Deployed HypercoreVaultLib at %s for HyperEVM", hypercore_lib.address)
+        else:
+            library_addresses["HypercoreVaultLib"] = ZERO_ADDRESS
+            logger.info("HypercoreVaultLib not needed, linking with zero address")
+
+        # TradingStrategyModuleV0 needs ~5.4M gas — exceeds small block limit on HyperEVM.
+        # Enable big blocks only for this deployment; libraries above fit in small blocks.
+        from eth_defi.hyperliquid.block import big_blocks_for_deployment
+        with big_blocks_for_deployment(web3, deployer.key.hex()):
+            logger.info("Deploying TradingStrategyModuleV0 with libraries %s and gas %d", library_addresses, guard_gas)
+            module = deploy_contract(
+                web3,
+                "safe-integration/TradingStrategyModuleV0.json",
+                deployer,
+                owner,
+                safe.address,
+                gas=guard_gas,
+                libraries=library_addresses,
+            )
+
+    logger.info("Enabling TradingStrategyModuleV0 on Safe multisig")
     if enable_on_safe:
         gas_estimate = estimate_gas_price(web3)
 
@@ -875,6 +960,7 @@ def setup_guard(
     velora: bool = False,
     gmx_deployment: GMXDeployment | None = None,
     cctp_deployment: CCTPDeployment | None = None,
+    hypercore_vaults: list[HexAddress | str] | None = None,
     hack_sleep=20.0,
     assets: list[HexAddress | str] | None = None,
     multicall_chunk_size=40,
@@ -1107,6 +1193,54 @@ def setup_guard(
     else:
         logger.info("Not whitelisted: CCTP")
 
+    # Whitelist Hypercore native vaults (HyperEVM only)
+    # Batch CoreWriter + all vault whitelisting into a single multicall transaction.
+    if hypercore_vaults:
+        from eth_defi.hyperliquid.core_writer import CORE_WRITER_ADDRESS
+        from eth_defi.hyperliquid.guard_whitelist import \
+            get_core_deposit_wallet
+
+        chain_id = web3.eth.chain_id
+        cdw_address = get_core_deposit_wallet(chain_id)
+        logger.info(
+            "Whitelisting Hypercore: CoreWriter=%s, CoreDepositWallet=%s",
+            CORE_WRITER_ADDRESS,
+            cdw_address,
+        )
+
+        # The deposit multicall calls approve(USDC) as its first step,
+        # so the underlying token must be whitelisted for transfer/approve.
+        underlying_address = Web3.to_checksum_address(vault.functions.asset().call())
+
+        multicalls = [
+            module.functions.whitelistToken(
+                underlying_address,
+                "Underlying token for Hypercore deposit approve",
+            ),
+            module.functions.whitelistCoreWriter(
+                Web3.to_checksum_address(CORE_WRITER_ADDRESS),
+                Web3.to_checksum_address(cdw_address),
+                "Hypercore vault trading",
+            ),
+        ]
+
+        for idx, hv_address in enumerate(hypercore_vaults, start=1):
+            logger.info("Whitelisting Hypercore vault #%d: %s", idx, hv_address)
+            multicalls.append(
+                module.functions.whitelistHypercoreVault(
+                    Web3.to_checksum_address(hv_address),
+                    f"Hypercore vault: {hv_address}",
+                )
+            )
+
+        call = module.functions.multicall(encode_multicalls(multicalls))
+        tx_hash = _broadcast(call)
+        assert_transaction_success_with_explanation(web3, tx_hash)
+
+        logger.info("Hypercore whitelisting complete: %d vault(s)", len(hypercore_vaults))
+    else:
+        logger.info("Not whitelisted: Hypercore")
+
     # Whitelist all assets
     if any_asset:
         logger.info("Allow any asset whitelist")
@@ -1138,6 +1272,7 @@ def deploy_automated_lagoon_vault(
     velora: bool = False,
     gmx_deployment: GMXDeployment | None = None,
     cctp_deployment: CCTPDeployment | None = None,
+    hypercore_vaults: list[HexAddress | str] | None = None,
     any_asset: bool = False,
     etherscan_api_key: str = None,
     verifier: Literal["etherscan", "blockscout", "sourcify", "oklink"] | None = None,
@@ -1229,6 +1364,7 @@ def deploy_automated_lagoon_vault(
         factory_contract = config.factory_contract
         from_the_scratch = config.from_the_scratch
         assets = config.assets
+        hypercore_vaults = config.hypercore_vaults
         safe_salt_nonce = config.safe_salt_nonce
         safe_proxy_factory_address = config.safe_proxy_factory_address
     else:
@@ -1260,6 +1396,19 @@ def deploy_automated_lagoon_vault(
     else:
         deployer_local_account = deployer
 
+    # HyperEVM dual-block architecture: enable large blocks only around
+    # contract deployments that exceed the small block gas limit (~2-3M).
+    # When a pre-deployed factory exists (mainnet), Safe and Lagoon vault
+    # deployment uses lightweight proxies that fit in small blocks — only
+    # TradingStrategyModuleV0 (~5.4M gas) needs big blocks.
+    # From-scratch deployment (testnet) needs big blocks for everything.
+    # Configuration transactions (guard setup, ownership, approvals) always
+    # use small blocks for fast ~1 second confirmation.
+    # https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/hyperevm/dual-block-architecture
+    from eth_defi.hyperliquid.block import big_blocks_for_deployment
+
+    _private_key_hex = deployer_local_account._private_key.hex()
+
     existing_guard_module = None
     beacon_proxy_factory_address = None
 
@@ -1287,24 +1436,29 @@ def deploy_automated_lagoon_vault(
         else:
             raise NotImplementedError(f"No idea about: {deployer}")
 
+    # When a pre-deployed factory exists, Safe proxy deployment fits in small blocks.
+    # From-scratch deployment needs big blocks for the full Safe contract.
+    _need_big_blocks_for_proxy = from_the_scratch
+
     if not existing_vault_address:
         # Deploy a Safe multisig that forms the core of Lagoon vault
-        if safe_salt_nonce is not None:
-            safe = deploy_safe_with_deterministic_address(
-                web3,
-                deployer_local_account,
-                owners=[deployer.address],
-                threshold=1,
-                salt_nonce=safe_salt_nonce,
-                proxy_factory_address=safe_proxy_factory_address or "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
-            )
-        else:
-            safe = deploy_safe(
-                web3,
-                deployer_local_account,
-                owners=[deployer.address],
-                threshold=1,
-            )
+        with big_blocks_for_deployment(web3, _private_key_hex) if _need_big_blocks_for_proxy else nullcontext():
+            if safe_salt_nonce is not None:
+                safe = deploy_safe_with_deterministic_address(
+                    web3,
+                    deployer_local_account,
+                    owners=[deployer.address],
+                    threshold=1,
+                    salt_nonce=safe_salt_nonce,
+                    proxy_factory_address=safe_proxy_factory_address or "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+                )
+            else:
+                safe = deploy_safe(
+                    web3,
+                    deployer_local_account,
+                    owners=[deployer.address],
+                    threshold=1,
+                )
 
         parameters.safe = safe.address
         logger.info("Deployed new Safe: %s", safe.address)
@@ -1349,48 +1503,55 @@ def deploy_automated_lagoon_vault(
 
     beacon_proxy_factory_abi = "lagoon/BeaconProxyFactory.json"  # Default ABI (legacy)
     if not existing_vault_address:
-        if from_the_scratch:
-            # Deploy the full Lagoon protocol with fee registry and beacon proxy factory,
-            # setting out Safe as the protocol owner
-            assert use_forge, "Fee registry deployment is only supported with Forge"
-            beacon_proxy_factory_contract = deploy_fresh_lagoon_protocol(
+        with big_blocks_for_deployment(web3, _private_key_hex) if _need_big_blocks_for_proxy else nullcontext():
+            if from_the_scratch:
+                # Deploy the full Lagoon protocol with fee registry and beacon proxy factory,
+                # setting out Safe as the protocol owner
+                assert use_forge, "Fee registry deployment is only supported with Forge"
+                beacon_proxy_factory_contract = deploy_fresh_lagoon_protocol(
+                    web3=web3,
+                    deployer=deployer,
+                    safe=safe,
+                    etherscan_api_key=etherscan_api_key,
+                    verifier=verifier,
+                    verifier_url=verifier_url,
+                    broadcast_func=_broadcast,
+                )
+                beacon_proxy_factory_address = beacon_proxy_factory_contract.address
+            else:
+                beacon_factory = LAGOON_BEACON_PROXY_FACTORIES.get(chain_id)
+                assert beacon_factory, f"No beacon factory in LAGOON_BEACON_PROXY_FACTORIES for {chain_id}"
+                beacon_proxy_factory_address = beacon_factory["address"]
+                beacon_proxy_factory_abi = beacon_factory["abi"]
+
+            assert beacon_proxy_factory_address, f"Cannot deploy Lagoon vault beacon proxy on chain {chain_id}, no factory address found. Registered factories: {pformat(LAGOON_BEACON_PROXY_FACTORIES)}"
+
+            vault_contract = deploy_lagoon(
                 web3=web3,
-                deployer=deployer,
+                deployer=deployer_local_account,
                 safe=safe,
+                asset_manager=asset_manager,
+                parameters=parameters,
+                owner=safe.address,
                 etherscan_api_key=etherscan_api_key,
-                verifier=verifier,
-                verifier_url=verifier_url,
-                broadcast_func=_broadcast,
+                use_forge=use_forge,
+                vault_abi=vault_abi,
+                factory_contract=factory_contract,
+                legacy=legacy,
+                beacon_proxy_factory_address=beacon_proxy_factory_address,
+                beacon_proxy_factory_abi=beacon_proxy_factory_abi,
             )
-            beacon_proxy_factory_address = beacon_proxy_factory_contract.address
-        else:
-            beacon_factory = LAGOON_BEACON_PROXY_FACTORIES.get(chain_id)
-            assert beacon_factory, f"No beacon factory in LAGOON_BEACON_PROXY_FACTORIES for {chain_id}"
-            beacon_proxy_factory_address = beacon_factory["address"]
-            beacon_proxy_factory_abi = beacon_factory["abi"]
-
-        assert beacon_proxy_factory_address, f"Cannot deploy Lagoon vault beacon proxy on chain {chain_id}, no factory address found. Registered factories: {pformat(LAGOON_BEACON_PROXY_FACTORIES)}"
-
-        vault_contract = deploy_lagoon(
-            web3=web3,
-            deployer=deployer_local_account,
-            safe=safe,
-            asset_manager=asset_manager,
-            parameters=parameters,
-            owner=safe.address,
-            etherscan_api_key=etherscan_api_key,
-            use_forge=use_forge,
-            vault_abi=vault_abi,
-            factory_contract=factory_contract,
-            legacy=legacy,
-            beacon_proxy_factory_address=beacon_proxy_factory_address,
-            beacon_proxy_factory_abi=beacon_proxy_factory_abi,
-        )
 
     if not is_anvil(web3):
         logger.info("Between contracts deployment delay: Sleeping %s for new nonce to propagade", between_contracts_delay_seconds)
         time.sleep(between_contracts_delay_seconds)
 
+    # Always use the non-Forge path for TradingStrategyModuleV0 because
+    # ``forge create`` does not support dynamic library linking.
+    # The Lagoon protocol contracts (ProtocolRegistry, Vault, BeaconProxyFactory)
+    # can use Forge because they have no library dependencies.
+    # Big blocks are handled inside deploy_safe_trading_strategy_module() —
+    # only the module itself (~5.4M gas) needs big blocks, not the libraries.
     module = deploy_safe_trading_strategy_module(
         web3=web3,
         deployer=deployer_local_account,
@@ -1398,8 +1559,10 @@ def deploy_automated_lagoon_vault(
         etherscan_api_key=etherscan_api_key,
         verifier=verifier,
         verifier_url=verifier_url,
-        use_forge=use_forge,
+        use_forge=False,
         enable_on_safe=not guard_only,
+        cowswap=cowswap,
+        gmx_deployment=gmx_deployment,
     )
 
     if not is_anvil(web3):
@@ -1409,7 +1572,7 @@ def deploy_automated_lagoon_vault(
     if isinstance(deployer, HotWallet):
         deployer.sync_nonce(web3)
 
-    # Configure TradingStrategyModuleV0 guard
+    # Configure TradingStrategyModuleV0 guard — runs in small blocks
     setup_guard(
         web3=web3,
         safe=safe,
@@ -1426,6 +1589,7 @@ def deploy_automated_lagoon_vault(
         velora=velora,
         gmx_deployment=gmx_deployment,
         cctp_deployment=cctp_deployment,
+        hypercore_vaults=hypercore_vaults,
         erc_4626_vaults=erc_4626_vaults,
         any_asset=any_asset,
         broadcast_func=_broadcast,
@@ -1505,6 +1669,7 @@ def deploy_automated_lagoon_vault(
         vault_abi=vault_abi,
         beacon_proxy_factory=beacon_proxy_factory_address,
         gas_used=Decimal((start_balance - end_balance) / 10**18),
+        safe_salt_nonce=safe_salt_nonce,
     )
 
 
@@ -1613,6 +1778,7 @@ def deploy_multichain_lagoon_vault(
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from copy import deepcopy
+
     from eth_defi.cctp.constants import CHAIN_ID_TO_CCTP_DOMAIN
     from eth_defi.token import USDC_NATIVE_TOKEN
 

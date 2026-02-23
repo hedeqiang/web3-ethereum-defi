@@ -85,6 +85,8 @@ WRAPPED_NATIVE_TOKEN: dict[int, HexAddress | str] = {
     957: "0x4200000000000000000000000000000000000006",
     # WHYPE: HyperEVM
     999: "0x5555555555555555555555555555555555555555",
+    # WHYPE: HyperEVM testnet (same address as mainnet)
+    998: "0x5555555555555555555555555555555555555555",
 }
 
 #: Addresses of USDC of different chains
@@ -110,6 +112,8 @@ USDC_NATIVE_TOKEN: dict[int, HexAddress | str] = {
     957: "0x6879287835A86F50f784313dBEd5E5cCC5bb8481",
     # HyperEVM
     999: "0xb88339CB7199b77E23DB6E890353E22632Ba630f",
+    # HyperEVM testnet (6 decimals, actual testnet USDC)
+    998: "0x2B3370eE501B4a559b57D449569354196457D8Ab",
 }
 
 #: Bridged USDC of different chains
@@ -403,6 +407,8 @@ class TokenDetails:
     - Any field can be ``None`` for non-well-formed tokens.
 
     - Supports one-way pickling
+
+    - Don't construct directly, use :py:func:`fetch_erc20_details` to read data onchain, with optional caching
 
     Example how to get USDC details on Polygon:
 
