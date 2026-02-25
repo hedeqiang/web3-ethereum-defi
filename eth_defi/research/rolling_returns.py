@@ -84,9 +84,17 @@ def visualise_rolling_returns(
     return fig
 
 
-def _calculate_1m_rolling_returns_from_prices(price_series: pd.Series) -> pd.Series:
-    """
-    Calculate 1-month rolling returns from hourly share prices.
+def _calculate_rolling_returns_from_prices(
+    price_series: pd.Series,
+    rolling_period: pd.Timedelta = pd.Timedelta(days=30),
+) -> pd.Series:
+    """Calculate rolling returns from hourly share prices.
+
+    :param price_series:
+        Share price time series with a DatetimeIndex.
+
+    :param rolling_period:
+        The rolling window size for return calculation.
     """
 
     def _window_returns(window):
@@ -95,7 +103,7 @@ def _calculate_1m_rolling_returns_from_prices(price_series: pd.Series) -> pd.Ser
         return window.iloc[-1] / window.iloc[0] - 1
 
     windowed = price_series.rolling(
-        window=pd.Timedelta(days=30),
+        window=rolling_period,
         min_periods=1,
     )
     rolling_returns = windowed.apply(_window_returns)
@@ -108,7 +116,8 @@ def calculate_rolling_returns(
     returns_df: pd.DataFrame,
     interesting_vaults: pd.Series | None = None,
     filtered_vault_list_df: pd.DataFrame | None = None,
-    period: pd.Timedelta = CHART_HISTORY,
+    history_length: pd.Timedelta = CHART_HISTORY,
+    rolling_period: pd.Timedelta = pd.Timedelta(days=30),
     cap: float = None,
     clip_down: float = None,
     clip_up: float = None,
@@ -133,6 +142,14 @@ def calculate_rolling_returns(
 
         A list of chain id-address strings.
 
+    :param history_length:
+        How far back to include data in the result.
+
+    :param rolling_period:
+        The rolling window size for return calculation.
+
+        Default is 30 days (1 month).
+
     :param chainify:
         Add the chain name in the title.
 
@@ -143,7 +160,7 @@ def calculate_rolling_returns(
     assert isinstance(returns_df.index, pd.DatetimeIndex)
 
     def _apply_chain_name(name: str, chain_id: int) -> str:
-        if not name:
+        if not isinstance(name, str) or not name:
             name = ""
         chain_name = get_chain_name(chain_id)
         if chain_name in name:
@@ -176,9 +193,12 @@ def calculate_rolling_returns(
         df = returns_df
 
     def _calc_returns(df):
-        # Calculate rollling returns
+        # Calculate rolling returns
 
-        df["rolling_1m_returns"] = df["share_price"].transform(_calculate_1m_rolling_returns_from_prices)
+        df["rolling_1m_returns"] = df["share_price"].transform(
+            _calculate_rolling_returns_from_prices,
+            rolling_period=rolling_period,
+        )
 
         # df["rolling_1m_returns_annualized"] = ((1 + df["rolling_1m_returns"] / 100) ** 12 - 1) * 100
         return df
@@ -212,7 +232,7 @@ def calculate_rolling_returns(
         df = df[~df["name"].isin(extreme_return_names)]
 
     # Limit chart width
-    df = df.loc[df["timestamp"] >= (pd.Timestamp.now() - period)]
+    df = df.loc[df["timestamp"] >= (pd.Timestamp.now() - history_length)]
 
     return df
 
@@ -252,6 +272,8 @@ def calculate_daily_returns_for_all_vaults(df_work: pd.DataFrame) -> pd.DataFram
 def visualise_rolling_returns(
     rolling_returns_df: pd.DataFrame,
     title="1M rolling returns by vault",
+    yaxis_title="1-Month Rolling Returns (%)",
+    yaxis_range: tuple[float, float] | None = None,
 ) -> Figure:
     """Visualise rolling returns from a DataFrame.
 
@@ -263,7 +285,10 @@ def visualise_rolling_returns(
     assert "timestamp" in rolling_returns_df.columns, "rolling_returns_df must have a 'timestamp' column, index not supported"
     assert "rolling_1m_returns" in rolling_returns_df.columns, "rolling_returns_df must have a 'rolling_1m_returns' column"
 
-    df = rolling_returns_df
+    df = rolling_returns_df.copy()
+
+    # Wrap long legend names
+    df["name"] = df["name"].apply(lambda x: wrap_legend_text(x, max_length=30))
 
     # Remove entries with all zero returns.
     # TODO: Get rid of Hyped USDB and others with zero returns still showing up in the charts
@@ -276,16 +301,17 @@ def visualise_rolling_returns(
         y="rolling_1m_returns",
         color="name",
         title=title,
-        labels={"rolling_1m_returns": "1-Month Rolling Returns (%)", "timestamp": "Date", "name": "Name"},
+        labels={"rolling_1m_returns": yaxis_title, "timestamp": "Date", "name": "Vault"},
         hover_data=["id"],
         color_discrete_sequence=qualitative.Dark24,
     )
     fig.update_layout(
         xaxis_title="Date",
-        yaxis_title="1-Month Rolling Returns (%)",
-        legend_title="Name",
+        yaxis_title=yaxis_title,
+        legend_title="Vault",
         hovermode="closest",
         template=pio.templates.default,
+        yaxis_range=list(yaxis_range) if yaxis_range else None,
     )
     fig.update_traces(line=dict(width=3))
 

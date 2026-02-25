@@ -4,6 +4,8 @@ from collections import Counter
 
 import pandas as pd
 
+from eth_defi.vault.flag import is_flagged_vault
+
 import plotly.graph_objects as go
 from plotly.graph_objects import Figure
 
@@ -29,6 +31,7 @@ def choose_vaults_for_correlation_comparison(
 
     lifetime_data_filtered_df = lifetime_data_filtered_df.dropna(subset=["three_months_returns", "current_nav"])
     lifetime_data_filtered_df = lifetime_data_filtered_df[lifetime_data_filtered_df["current_nav"] >= min_nav]
+    lifetime_data_filtered_df = lifetime_data_filtered_df[~lifetime_data_filtered_df["address"].str.lower().apply(is_flagged_vault)]
 
     lifetime_data_filtered_df = lifetime_data_filtered_df.sort_values(by="three_months_returns", ascending=False)
 

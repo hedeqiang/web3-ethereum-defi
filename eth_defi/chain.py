@@ -237,7 +237,7 @@ def get_chain_homepage(chain_id: int) -> tuple[str, str]:
     name = CHAIN_NAMES.get(chain_id)
     link = CHAIN_HOMEPAGES.get(chain_id)
     if not name or not link:
-        return f"<Unknown chain , id {chain_id}>", "https://"
+        return f"Unknown chain {chain_id}", "https://"
 
     return name, link["homepage"]
 
@@ -248,7 +248,7 @@ def get_chain_name(chain_id: int) -> str:
     if name:
         return name
 
-    return f"<Unknown chain, id {chain_id}>"
+    return f"Unknown chain {chain_id}"
 
 
 def get_chain_id_by_name(name: str) -> Optional[int]:
@@ -277,7 +277,7 @@ def get_block_time(chain_id: int) -> float:
         Average block time in seconds.
     """
     block_time = EVM_BLOCK_TIMES.get(chain_id)
-    assert block_time is not None, f"Unknown chain id {chain_id} {get_chain_name()} for block time lookup table"
+    assert block_time is not None, f"Unknown chain {chain_id} for block time lookup table"
     return block_time
 
 
