@@ -21,11 +21,8 @@ import cachetools
 from web3.contract.contract import ContractFunction, ContractFunctions
 
 from eth_defi.compat import native_datetime_utc_now
-from eth_defi.event_reader.conversion import (convert_int256_bytes_to_int,
-                                              convert_solidity_bytes_to_string)
-from eth_defi.event_reader.multicall_batcher import (EncodedCall,
-                                                     EncodedCallResult,
-                                                     read_multicall_chunked)
+from eth_defi.event_reader.conversion import convert_int256_bytes_to_int, convert_solidity_bytes_to_string
+from eth_defi.event_reader.multicall_batcher import EncodedCall, EncodedCallResult, read_multicall_chunked
 from eth_defi.event_reader.web3factory import Web3Factory
 from eth_defi.provider.named import get_provider_name
 from eth_defi.sqlite_cache import PersistentKeyValueStore
@@ -81,12 +78,17 @@ WRAPPED_NATIVE_TOKEN: dict[int, HexAddress | str] = {
     43114: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
     # WETH: Arbitrum Sepolia
     421614: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9",
+    # WETH: Base Sepolia (OP Stack predeploy, same as Base mainnet)
+    84532: "0x4200000000000000000000000000000000000006",
     # WETH: Derive (OP Stack, same as Base/Optimism)
     957: "0x4200000000000000000000000000000000000006",
     # WHYPE: HyperEVM
     999: "0x5555555555555555555555555555555555555555",
     # WHYPE: HyperEVM testnet (same address as mainnet)
     998: "0x5555555555555555555555555555555555555555",
+    # WMON: Monad
+    # https://docs.monad.xyz/developer-essentials/network-information
+    143: "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A",
 }
 
 #: Addresses of USDC of different chains
@@ -114,6 +116,9 @@ USDC_NATIVE_TOKEN: dict[int, HexAddress | str] = {
     999: "0xb88339CB7199b77E23DB6E890353E22632Ba630f",
     # HyperEVM testnet (6 decimals, actual testnet USDC)
     998: "0x2B3370eE501B4a559b57D449569354196457D8Ab",
+    # Monad
+    # https://developers.circle.com/stablecoins/usdc-contract-addresses
+    143: "0x754704Bc059F8C67012fEd69BC8A327a5aafb603",
 }
 
 #: Bridged USDC of different chains
@@ -136,6 +141,9 @@ USDC_WHALE: dict[int, HexAddress | str] = {
     # https://arbiscan.io/token/0xaf88d065e77c8cc2239327c5edb3a432268e5831#balances
     42161: "0x3DD1D15b3c78d6aCFD75a254e857Cbe5b9fF0aF2",
     # To find large holder accounts, use polygonscan <https://polygonscan.com/token/0x2791bca1f2de4661ed88a30c99a7a9449aa84174#balances>
+    # Monad
+    # RWA Backed Lending by Valos vault — large USDC holder
+    143: "0x8d3f9f9eb2f5e8b48efbb4074440d1e2a34bc365",
 }
 
 # Bridged USDC.e
