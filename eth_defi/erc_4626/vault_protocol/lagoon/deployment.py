@@ -313,6 +313,20 @@ class LagoonConfig:
 
 
 @dataclass(slots=True, frozen=True)
+class WhitelistEntry:
+    """A single guard whitelist entry recorded during deployment."""
+
+    #: Category (e.g. "Uniswap V3 router", "ERC-4626 vault", "CCTP")
+    kind: str
+
+    #: Human-readable name (e.g. token symbol, vault name)
+    name: str
+
+    #: On-chain address, or empty string for non-address entries
+    address: HexAddress | str = ""
+
+
+@dataclass(slots=True, frozen=True)
 class LagoonAutomatedDeployment:
     """Capture information of the lagoon automated deployment.
 
@@ -352,6 +366,9 @@ class LagoonAutomatedDeployment:
     #: Recorded so the deployment can be reproduced or debugged later.
     #: ``None`` when deployed without a deterministic address (e.g. from-scratch testnet).
     safe_salt_nonce: int | None = None
+
+    #: Items whitelisted on the guard during deployment.
+    whitelisted_items: tuple[WhitelistEntry, ...] = ()
 
     @property
     def safe(self) -> Safe:
@@ -407,6 +424,18 @@ class LagoonAutomatedDeployment:
             print("{:<30} {:<30}".format(k, v or "-"), file=io)
 
         return io.getvalue()
+
+    def format_whitelisted_items(self, indent: str = "    ") -> str:
+        """Format whitelisted items as a human-readable string."""
+        if not self.whitelisted_items:
+            return f"{indent}(none)"
+        lines = []
+        for entry in self.whitelisted_items:
+            if entry.address:
+                lines.append(f"{indent}{entry.kind}: {entry.name} ({entry.address})")
+            else:
+                lines.append(f"{indent}{entry.kind}: {entry.name}")
+        return "\n".join(lines)
 
 
 @dataclass(slots=True, frozen=True)
@@ -1004,7 +1033,7 @@ def setup_guard(
     assets: list[HexAddress | str] | None = None,
     multicall_chunk_size=40,
     underlying_token_address: HexAddress | None = None,
-):
+) -> list[WhitelistEntry]:
     """Setups up TradingStrategyModuleV0 guard on the Lagoon vault.
 
     - Creates the guard smart contract (TradingStrategyModuleV0)
@@ -1017,6 +1046,9 @@ def setup_guard(
 
     :param underlying_token_address:
         Underlying token address for Hypercore whitelisting when vault is None.
+
+    :return:
+        List of :class:`WhitelistEntry` recording everything that was whitelisted.
     """
 
     assert isinstance(deployer, HotWallet), f"Got: {deployer}"
@@ -1027,6 +1059,7 @@ def setup_guard(
     assert callable(broadcast_func), "Must have a broadcast function for txs"
 
     _broadcast = broadcast_func
+    entries: list[WhitelistEntry] = []
 
     logger.info("Setting up TradingStrategyModuleV0 guard: %s", module.address)
 
@@ -1034,11 +1067,13 @@ def setup_guard(
     logger.info("Whitelisting trade-executor as sender")
     tx_hash = _broadcast(module.functions.allowSender(asset_manager, "Whitelist trade-executor"))
     assert_transaction_success_with_explanation(web3, tx_hash)
+    entries.append(WhitelistEntry("Sender", "trade-executor", asset_manager))
 
     # Enable safe as the receiver of tokens
     logger.info("Whitelist Safe as trade receiver")
     tx_hash = _broadcast(module.functions.allowReceiver(safe.address, "Whitelist Safe as trade receiver"))
     assert_transaction_success_with_explanation(web3, tx_hash)
+    entries.append(WhitelistEntry("Receiver", "Safe", safe.address))
 
     anvil = is_anvil(web3)
 
@@ -1050,6 +1085,7 @@ def setup_guard(
         logger.info("Whitelisting Uniswap v2 router: %s", uniswap_v2.router.address)
         tx_hash = _broadcast(module.functions.whitelistUniswapV2Router(uniswap_v2.router.address, "Allow Uniswap v2"))
         assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("Uniswap V2 router", "Router02", uniswap_v2.router.address))
     else:
         logger.info("Not whitelisted: Uniswap v2")
 
@@ -1058,6 +1094,7 @@ def setup_guard(
         logger.info("Whitelisting Uniswap v3 router: %s", uniswap_v3.swap_router.address)
         tx_hash = _broadcast(module.functions.whitelistUniswapV3Router(uniswap_v3.swap_router.address, "Allow Uniswap v3"))
         assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("Uniswap V3 router", "SwapRouter", uniswap_v3.swap_router.address))
     else:
         logger.info("Not whitelisted: Uniswap v3")
 
@@ -1072,12 +1109,15 @@ def setup_guard(
         tx_hash = _broadcast(module.functions.whitelistAaveV3(aave_v3.pool.address, note))
         assert_transaction_success_with_explanation(web3, tx_hash)
 
+        entries.append(WhitelistEntry("Aave V3 pool", "Pool", aave_v3.pool.address))
+
         atokens = [ausdc]
         for token in atokens:
             logger.info("Aave whitelisting for pool %s, aUSDC %s", aave_v3.pool.address, token.address)
             note = f"Aave v3 pool whitelisting for {token.symbol}"
             tx_hash = _broadcast(module.functions.whitelistToken(ausdc.address, note))
             assert_transaction_success_with_explanation(web3, tx_hash)
+            entries.append(WhitelistEntry("Aave V3 aToken", token.symbol, token.address))
 
     else:
         logger.info("Not whitelisted: Aave v3")
@@ -1086,6 +1126,7 @@ def setup_guard(
         logger.info("Whitelisting Orderly vault: %s", orderly_vault.address)
         tx_hash = _broadcast(module.functions.whitelistOrderly(orderly_vault.address, "Allow Orderly"))
         assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("Orderly vault", "Orderly", orderly_vault.address))
     else:
         logger.info("Not whitelisted: Orderly vault")
 
@@ -1128,6 +1169,9 @@ def setup_guard(
         for idx, erc_4626_vault in enumerate(erc_4626_vaults, start=1):
             result = module.functions.isAllowedApprovalDestination(erc_4626_vault.vault_address).call()
             assert result == True, f"Guard {module.address} approval check for ERC-4626 vault failed, attempted to whitelist: {erc_4626_vault.vault_address}, isAllowedApprovalDestination(): {result}"
+
+        for erc_4626_vault in erc_4626_vaults:
+            entries.append(WhitelistEntry("ERC-4626 vault", erc_4626_vault.name, erc_4626_vault.vault_address))
     else:
         logger.info("Not whitelisted: any ERC-4626 vaults")
 
@@ -1151,6 +1195,7 @@ def setup_guard(
                 note = f"Whitelisting {token.name}"
                 partial_cal = module.functions.whitelistToken(Web3.to_checksum_address(asset), note)
                 multicalls.append(partial_cal)
+                entries.append(WhitelistEntry("Token", token.symbol, asset))
 
             call = module.functions.multicall(encode_multicalls(multicalls))
             tx_hash = _broadcast(call)
@@ -1170,6 +1215,8 @@ def setup_guard(
         logger.info("Whitelisting CowSwap: %s", COWSWAP_SETTLEMENT)
         tx_hash = _broadcast(module.functions.whitelistCowSwap(COWSWAP_SETTLEMENT, COWSWAP_VAULT_RELAYER, "Allow CowSwap"))
         assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("CowSwap", "Settlement", COWSWAP_SETTLEMENT))
+        entries.append(WhitelistEntry("CowSwap", "VaultRelayer", COWSWAP_VAULT_RELAYER))
 
     if velora:
         chain_id = web3.eth.chain_id
@@ -1178,6 +1225,8 @@ def setup_guard(
         logger.info("Whitelisting Velora: Augustus %s, TokenTransferProxy %s", augustus, proxy)
         tx_hash = _broadcast(module.functions.whitelistVelora(augustus, proxy, "Allow Velora"))
         assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("Velora", "Augustus", augustus))
+        entries.append(WhitelistEntry("Velora", "TokenTransferProxy", proxy))
 
     # Whitelist GMX perpetuals trading
     if gmx_deployment:
@@ -1196,12 +1245,14 @@ def setup_guard(
             )
         )
         assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("GMX", "ExchangeRouter", gmx_deployment.exchange_router))
 
         # Whitelist GMX markets
         for idx, market in enumerate(gmx_deployment.markets, start=1):
             logger.info("Whitelisting GMX market #%d: %s", idx, market)
             tx_hash = _broadcast(module.functions.whitelistGMXMarket(market, f"GMX market #{idx}"))
             assert_transaction_success_with_explanation(web3, tx_hash)
+            entries.append(WhitelistEntry("GMX market", f"market #{idx}", market))
 
         # Whitelist GMX collateral tokens if specified
         if gmx_deployment.tokens:
@@ -1209,6 +1260,7 @@ def setup_guard(
                 logger.info("Whitelisting GMX collateral token #%d: %s", idx, token)
                 tx_hash = _broadcast(module.functions.whitelistToken(token, f"GMX collateral #{idx}"))
                 assert_transaction_success_with_explanation(web3, tx_hash)
+                entries.append(WhitelistEntry("GMX token", f"collateral #{idx}", token))
 
         logger.info("GMX whitelisting complete: %d markets", len(gmx_deployment.markets))
     else:
@@ -1227,11 +1279,13 @@ def setup_guard(
             )
         )
         assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("CCTP", "TokenMessenger", cctp_deployment.token_messenger))
 
         for domain in cctp_deployment.allowed_destination_domains:
             logger.info("Whitelisting CCTP destination domain: %d", domain)
             tx_hash = _broadcast(module.functions.whitelistCCTPDestination(domain, f"CCTP domain {domain}"))
             assert_transaction_success_with_explanation(web3, tx_hash)
+            entries.append(WhitelistEntry("CCTP destination", f"domain {domain}"))
 
         logger.info(
             "CCTP whitelisting complete: %d destination(s)",
@@ -1288,6 +1342,10 @@ def setup_guard(
         tx_hash = _broadcast(call)
         assert_transaction_success_with_explanation(web3, tx_hash)
 
+        entries.append(WhitelistEntry("Hypercore", "CoreWriter", CORE_WRITER_ADDRESS))
+        for hv_address in hypercore_vaults:
+            entries.append(WhitelistEntry("Hypercore vault", str(hv_address), hv_address))
+
         logger.info("Hypercore whitelisting complete: %d vault(s)", len(hypercore_vaults))
     else:
         logger.info("Not whitelisted: Hypercore")
@@ -1297,6 +1355,7 @@ def setup_guard(
         logger.info("Allow any asset whitelist")
         tx_hash = _broadcast(module.functions.setAnyAssetAllowed(True, "Allow any asset"))
         assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("Any asset", "enabled"))
     else:
         logger.info("Using only whitelisted assets")
 
@@ -1305,8 +1364,11 @@ def setup_guard(
         logger.info("Whitelist vault settlement")
         tx_hash = _broadcast(module.functions.whitelistLagoon(vault.address, "Whitelist vault settlement"))
         assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("Vault settlement", "Lagoon vault", vault.address))
     else:
         logger.info("Skipping vault settlement whitelisting (satellite chain, no vault)")
+
+    return entries
 
 
 def deploy_automated_lagoon_vault(
@@ -1646,7 +1708,7 @@ def deploy_automated_lagoon_vault(
         deployer.sync_nonce(web3)
 
     # Configure TradingStrategyModuleV0 guard — runs in small blocks
-    setup_guard(
+    whitelisted_items = setup_guard(
         web3=web3,
         safe=safe,
         vault=vault_contract,
@@ -1761,6 +1823,7 @@ def deploy_automated_lagoon_vault(
         beacon_proxy_factory=beacon_proxy_factory_address,
         gas_used=Decimal((start_balance - end_balance) / 10**18),
         safe_salt_nonce=safe_salt_nonce,
+        whitelisted_items=tuple(whitelisted_items),
     )
 
 

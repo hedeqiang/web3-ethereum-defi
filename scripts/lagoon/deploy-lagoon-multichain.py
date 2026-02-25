@@ -479,6 +479,7 @@ def create_testnet_whitelisting_configuration(
                 router_address=d["router"],
                 position_manager_address=d["position_manager"],
                 quoter_address=d["quoter"],
+                router_v2=d.get("router_v2", False),
             )
             configs[chain_name].uniswap_v3 = uni_v3
             logger.info("Uniswap V3 configured on %s (testnet)", chain_name)
@@ -709,6 +710,7 @@ def swap_on_satellites(
             router_address=d["router"],
             position_manager_address=d["position_manager"],
             quoter_address=d["quoter"],
+            router_v2=d.get("router_v2", False),
         )
 
         usdc = fetch_erc20_details(web3, USDC_NATIVE_TOKEN[chain_id])
@@ -738,14 +740,20 @@ def swap_on_satellites(
         else:
             chain_wallet = None
 
-        # Approve USDC for Uniswap V3 router
-        approve_call = usdc.contract.functions.approve(uni_v3.swap_router.address, swap_amount)
+        # Approve max USDC for Uniswap V3 router (avoids testnet RPC race
+        # conditions where estimate_gas doesn't yet see a tight approval).
+        approve_call = usdc.contract.functions.approve(uni_v3.swap_router.address, 2**256 - 1)
         moduled_tx = satellite.transact_via_trading_strategy_module(approve_call)
         if chain_wallet is not None:
             tx_hash = chain_wallet.transact_and_broadcast_with_contract(moduled_tx)
         else:
             tx_hash = moduled_tx.transact({"from": result.deployments[source_chain].vault.safe_address, "gas": 1_000_000})
         assert_transaction_success_with_explanation(web3, tx_hash)
+
+        # Small delay for testnet RPC state propagation — public endpoints
+        # like sepolia.base.org are load-balanced and estimate_gas may hit
+        # a backend that hasn't yet seen the approve confirmation.
+        time.sleep(3)
 
         # Swap USDC -> WETH
         swap_call = swap_with_slippage_protection(
@@ -759,7 +767,9 @@ def swap_on_satellites(
         )
         moduled_tx = satellite.transact_via_trading_strategy_module(swap_call)
         if chain_wallet is not None:
-            tx_hash = chain_wallet.transact_and_broadcast_with_contract(moduled_tx)
+            # Use explicit gas limit to avoid estimate_gas hitting a stale
+            # RPC node that hasn't indexed the approval yet.
+            tx_hash = chain_wallet.transact_and_broadcast_with_contract(moduled_tx, gas_limit=500_000)
         else:
             tx_hash = moduled_tx.transact({"from": result.deployments[source_chain].vault.safe_address, "gas": 1_000_000})
         assert_transaction_success_with_explanation(web3, tx_hash)
@@ -896,6 +906,7 @@ def main():
         print("\n" + "=" * 70)
         print("Deployment summary")
         print("=" * 70)
+        print(f"  Deployer:                   {deployer.address}")
         print(f"  Deterministic Safe address: {result.safe_address}")
         print(f"  Salt nonce: {result.safe_salt_nonce}")
         print()
@@ -907,6 +918,9 @@ def main():
                 print(f"    Vault:  {deployment.vault.address}")
             print(f"    Safe:   {deployment.safe_address}")
             print(f"    Module: {deployment.trading_strategy_module.address if deployment.trading_strategy_module else 'N/A'}")
+            if deployment.whitelisted_items:
+                print(f"    Whitelisted:")
+                print(deployment.format_whitelisted_items(indent="      "))
 
         # --- Step 7: Fund source vault for bridging ---
         source_chain_id = chain_web3[source_chain].eth.chain_id
@@ -1014,10 +1028,16 @@ def main():
             print(f"    Safe USDC:   {safe_balance} USDC")
             weth_address = WRAPPED_NATIVE_TOKEN.get(chain_id)
             if weth_address:
-                weth = fetch_erc20_details(web3, weth_address)
-                weth_balance = weth.fetch_balance_of(deployment.safe_address)
-                if weth_balance > 0:
-                    print(f"    Safe WETH:   {weth_balance} WETH")
+                try:
+                    weth = fetch_erc20_details(web3, weth_address)
+                    weth_balance = weth.fetch_balance_of(deployment.safe_address)
+                    if weth_balance > 0:
+                        print(f"    Safe WETH:   {weth_balance} WETH")
+                except Exception as e:
+                    logger.warning("Could not fetch WETH balance on chain %d: %s", chain_id, e)
+            if deployment.whitelisted_items:
+                print(f"    Whitelisted:")
+                print(deployment.format_whitelisted_items(indent="      "))
 
         print("\nDone!")
 

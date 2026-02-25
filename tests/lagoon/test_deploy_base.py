@@ -128,6 +128,17 @@ def test_lagoon_deploy_base_guarded_any_token(
 
     assert vault.version == LagoonVersion.v_0_5_0
 
+    # Verify whitelisted items were recorded
+    # Uniswap V2 + any_asset deployment should have: Sender, Receiver, Uniswap V2 router, Any asset, Vault settlement
+    assert len(deploy_info.whitelisted_items) == 5
+    kinds = {e.kind for e in deploy_info.whitelisted_items}
+    assert "Sender" in kinds
+    assert "Receiver" in kinds
+    assert "Uniswap V2 router" in kinds
+    assert "Any asset" in kinds
+    assert "Vault settlement" in kinds
+    assert deploy_info.format_whitelisted_items()
+
     pretty = deploy_info.pformat()
     assert type(pretty) == str
     logging.info("Deployment is:\n%s", pretty)
@@ -332,6 +343,15 @@ def test_lagoon_deploy_base_guarded_any_token(
     assert usdc.contract.functions.allowance(vault.safe.address, vault.address).call() > 0
 
     assert vault.version == LagoonVersion.v_0_5_0
+
+    # Verify whitelisted items were recorded
+    assert len(deploy_info.whitelisted_items) == 5
+    kinds = {e.kind for e in deploy_info.whitelisted_items}
+    assert "Sender" in kinds
+    assert "Receiver" in kinds
+    assert "Uniswap V2 router" in kinds
+    assert "Any asset" in kinds
+    assert "Vault settlement" in kinds
 
     pretty = deploy_info.pformat()
     assert type(pretty) == str

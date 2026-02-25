@@ -76,8 +76,8 @@ WRAPPED_NATIVE_TOKEN: dict[int, HexAddress | str] = {
     42161: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1",
     # WAVAX
     43114: "0xB31f66AA3C1e785363F0875A1B74E27b85FD66c7",
-    # WETH: Arbitrum Sepolia
-    421614: "0x7b79995e5f793A07Bc00c21412e50Ecae098E7f9",
+    # WETH: Arbitrum Sepolia (Uniswap canonical)
+    421614: "0x980B62Da83eFf3D4576C647993b0c1D7faf17c73",
     # WETH: Base Sepolia (OP Stack predeploy, same as Base mainnet)
     84532: "0x4200000000000000000000000000000000000006",
     # WETH: Derive (OP Stack, same as Base/Optimism)

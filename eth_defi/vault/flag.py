@@ -115,8 +115,11 @@ def get_notes(address: HexAddress | str, chain_id: int | None = None) -> str | N
 
 
 def is_flagged_vault(address: HexAddress | str) -> bool:
-    """Is this vault flagged for any special reason?"""
-    assert address.startswith("0x"), f"Invalid address: {address}"
+    """Is this vault flagged for any special reason?
+
+    Supports both EVM (``0x``-prefixed) and non-EVM addresses (e.g. GRVT ``vlt:`` prefix).
+    """
+    address = address.lower()
     return VAULT_FLAGS_AND_NOTES.get(address) is not None
 
 

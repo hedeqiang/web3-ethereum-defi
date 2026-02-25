@@ -20,7 +20,7 @@ from filelock import FileLock
 logger = logging.getLogger(__name__)
 
 
-def is_good_vault_address(address: str) -> bool:
+def is_good_multichain_address(address: str) -> bool:
     """Check if a vault address has a recognised format.
 
     - EVM vaults use ``0x``-prefixed hex addresses

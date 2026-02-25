@@ -279,6 +279,16 @@ def test_multichain_lagoon_deploy_and_parallel_cctp_bridge(
         guard = result.deployments[chain_name].trading_strategy_module
         assert guard is not None
 
+    # Verify whitelisted items were recorded on each chain
+    for chain_name, deployment in result.deployments.items():
+        assert len(deployment.whitelisted_items) > 0, f"No whitelisted items on {chain_name}"
+        kinds = {e.kind for e in deployment.whitelisted_items}
+        assert "Sender" in kinds
+        assert "Receiver" in kinds
+        assert "CCTP" in kinds
+        assert "Any asset" in kinds
+        assert "Vault settlement" in kinds  # All chains are non-satellite here
+
     # --- Part 2: Parallel CCTP bridging Arbitrum -> Ethereum, Base, HyperEVM ---
 
     arb_vault = result.deployments["arbitrum"].vault
@@ -445,6 +455,15 @@ def test_satellite_deploy_bridge_and_swap(
 
     # Verify same deterministic Safe address on both chains
     assert result.deployments["arbitrum"].safe_address == result.deployments["base"].safe_address
+
+    # Verify whitelisted items: source chain has vault settlement, satellite does not
+    arb_kinds = {e.kind for e in result.deployments["arbitrum"].whitelisted_items}
+    base_kinds = {e.kind for e in result.deployments["base"].whitelisted_items}
+    assert "Vault settlement" in arb_kinds
+    assert "Vault settlement" not in base_kinds
+    assert "Uniswap V3 router" in base_kinds  # Base has V3 whitelisted
+    assert len(result.deployments["arbitrum"].whitelisted_items) > 0
+    assert len(result.deployments["base"].whitelisted_items) > 0
 
     # --- Fund Arbitrum vault and bridge USDC to Base satellite ---
 
