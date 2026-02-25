@@ -1,5 +1,6 @@
 """Test Curvance vault metadata."""
 
+import logging
 import os
 
 import flaky
@@ -23,17 +24,21 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def anvil_monad_fork(request) -> AnvilLaunch:
-    """Fork Monad at a specific block for reproducibility."""
-    launch = fork_network_anvil(JSON_RPC_MONAD, fork_block_number=47146721)
+    """Fork at the latest block — Monad RPCs do not support archive state."""
+    launch = fork_network_anvil(JSON_RPC_MONAD)
     try:
         yield launch
     finally:
-        launch.close()
+        launch.close(log_level=logging.INFO)
 
 
 @pytest.fixture(scope="module")
 def web3(anvil_monad_fork):
-    web3 = create_multi_provider_web3(anvil_monad_fork.json_rpc_url)
+    web3 = create_multi_provider_web3(
+        anvil_monad_fork.json_rpc_url,
+        retries=2,
+        default_http_timeout=(10, 60),
+    )
     return web3
 
 
