@@ -13,7 +13,6 @@
 
 pragma solidity ^0.8.0;
 
-import "./lib/Path.sol";
 import "./IGuard.sol";
 
 import "./lib/IERC4626.sol";
@@ -27,6 +26,7 @@ import {
     SEL_CORE_DEPOSIT,
     SEL_CORE_DEPOSIT_FOR
 } from "./lib/HypercoreVaultLib.sol";
+import {UniswapLib} from "./lib/UniswapLib.sol";
 import {VeloraLib} from "./lib/VeloraLib.sol";
 
 // Pre-computed function selectors to avoid runtime keccak256
@@ -88,33 +88,6 @@ bytes4 constant SEL_CCTP_DEPOSIT_FOR_BURN = 0x8e0250ee; // depositForBurn(uint25
  *
  */
 abstract contract GuardV0Base is IGuard, Multicall {
-    using Path for bytes;
-    using BytesLib for bytes;
-
-    struct ExactInputParams {
-        bytes path;
-        address recipient;
-        uint256 deadline;
-        uint256 amountIn;
-        uint256 amountOutMinimum;
-    }
-
-    struct ExactOutputParams {
-        bytes path;
-        address recipient;
-        uint256 deadline;
-        uint256 amountOut;
-        uint256 amountInMaximum;
-    }
-
-    // Uniswap SwapRouter02 (IV3SwapRouter) uses a different struct layout
-    // with no `deadline` field, unlike the original SwapRouter.
-    struct ExactInputParamsRouter02 {
-        bytes path;
-        address recipient;
-        uint256 amountIn;
-        uint256 amountOutMinimum;
-    }
 
     // ========================================================================
     //                           STORAGE VARIABLES
@@ -533,14 +506,14 @@ abstract contract GuardV0Base is IGuard, Multicall {
     }
 
     // Allow ERC-20.approve() to a specific asset and this asset used as the part of path of swaps
-    function whitelistToken(address token, string calldata notes) external {
+    function whitelistToken(address token, string calldata notes) external onlyGuardOwner {
         _whitelistToken(token, notes);
     }
 
     function whitelistTokenForDelegation(
         address token,
         string calldata notes
-    ) external {
+    ) external onlyGuardOwner {
         allowCallSite(token, SEL_APPROVE_DELEGATION, notes);
         allowAsset(token, notes);
     }
@@ -549,7 +522,7 @@ abstract contract GuardV0Base is IGuard, Multicall {
     function whitelistUniswapV3Router(
         address router,
         string calldata notes
-    ) external {
+    ) external onlyGuardOwner {
         allowCallSite(router, SEL_EXACT_INPUT, notes);
         allowCallSite(router, SEL_EXACT_OUTPUT, notes);
         allowCallSite(router, SEL_EXACT_INPUT_ROUTER02, notes);
@@ -559,7 +532,7 @@ abstract contract GuardV0Base is IGuard, Multicall {
     function whitelistUniswapV2Router(
         address router,
         string calldata notes
-    ) external {
+    ) external onlyGuardOwner {
         allowCallSite(router, SEL_SWAP_EXACT_TOKENS, notes);
         allowCallSite(router, SEL_SWAP_EXACT_TOKENS_FEE, notes);
         allowApprovalDestination(router, notes);
@@ -633,21 +606,16 @@ abstract contract GuardV0Base is IGuard, Multicall {
         // Depends on the called protocol.
 
         // --- DEX swaps (Uniswap V2/V3) ---
-        if (selector == SEL_SWAP_EXACT_TOKENS) {
-            validate_swapExactTokensForTokens(callData);
-        } else if (selector == SEL_SWAP_EXACT_TOKENS_FEE) {
-            validate_swapExactTokensForTokens(callData);
+        if (selector == SEL_SWAP_EXACT_TOKENS ||
+            selector == SEL_SWAP_EXACT_TOKENS_FEE) {
+            UniswapLib.validateSwapV2(callData);
         } else if (selector == SEL_EXACT_INPUT) {
-            validate_exactInput(callData);
+            UniswapLib.validateExactInput(callData);
         } else if (selector == SEL_EXACT_OUTPUT) {
-            // Previously unreachable: whitelistUniswapV3Router() registered
-            // the call site but the dispatcher had no branch, causing all
-            // exactOutput calls to revert with "Unknown function selector".
-            validate_exactOutput(callData);
+            UniswapLib.validateExactOutput(callData);
         } else if (selector == SEL_EXACT_INPUT_ROUTER02) {
-            // See whitelistUniswapV3Router
             require(anyAsset, "SwapRouter02 requires anyAsset");
-            validate_exactInputRouter02(callData);
+            UniswapLib.validateExactInputRouter02(callData, anyAsset);
 
             // --- ERC-20 token operations ---
         } else if (selector == SEL_TRANSFER) {
@@ -701,121 +669,21 @@ abstract contract GuardV0Base is IGuard, Multicall {
 
             // --- GMX perpetuals ---
         } else if (selector == SEL_GMX_MULTICALL) {
-            _validate_gmxMulticall(target, callData);
+            require(GmxLib.isDeployed(), "GmxLib not linked");
+            GmxLib.validateMulticall(target, callData, anyAsset);
 
             // --- CCTP cross-chain transfers ---
         } else if (selector == SEL_CCTP_DEPOSIT_FOR_BURN) {
             validate_cctpDepositForBurn(target, callData);
 
-            // --- Hypercore CoreWriter ---
-        } else if (selector == SEL_SEND_RAW_ACTION) {
+            // --- Hypercore (CoreWriter + CoreDepositWallet) ---
+        } else if (selector == SEL_SEND_RAW_ACTION ||
+                   selector == SEL_CORE_DEPOSIT ||
+                   selector == SEL_CORE_DEPOSIT_FOR) {
             require(HypercoreVaultLib.isDeployed(), "HypercoreVaultLib not linked");
-            (uint24 actionId, address dest) = HypercoreVaultLib.validateAction(
-                target,
-                callData
-            );
-            if (actionId == 2) {
-                // VAULT_TRANSFER_ACTION — dest is the Hypercore vault address
-                require(
-                    HypercoreVaultLib.isAllowedHypercoreVault(dest),
-                    "Hypercore vault not allowed"
-                );
-            } else if (actionId == 6) {
-                // SPOT_SEND_ACTION — dest is the token send recipient
-                require(isAllowedReceiver(dest), "CoreWriter spotSend receiver not allowed");
-            }
-            // Action 7 (USD_CLASS_TRANSFER_ACTION): no external address.
-            // Funds move between spot and perp within the same Hypercore account.
-
-            // --- Hypercore CoreDepositWallet ---
-        } else if (selector == SEL_CORE_DEPOSIT) {
-            require(HypercoreVaultLib.isDeployed(), "HypercoreVaultLib not linked");
-            HypercoreVaultLib.validateDeposit(target);
-
-            // --- Hypercore CoreDepositWallet depositFor (account activation) ---
-        } else if (selector == SEL_CORE_DEPOSIT_FOR) {
-            require(HypercoreVaultLib.isDeployed(), "HypercoreVaultLib not linked");
-            HypercoreVaultLib.validateDeposit(target);
-            (address recipient, , ) = abi.decode(callData, (address, uint256, uint32));
-            require(isAllowedReceiver(recipient), "depositFor recipient not allowed");
+            HypercoreVaultLib.validateCall(selector, target, callData);
         } else {
             revert("Unknown function selector");
-        }
-    }
-
-    // Validate Uniswap v2 trade
-    function validate_swapExactTokensForTokens(
-        bytes memory callData
-    ) internal view {
-        (, , address[] memory path, address to, ) = abi.decode(
-            callData,
-            (uint, uint, address[], address, uint)
-        );
-        require(isAllowedReceiver(to), "Receiver not whitelisted");
-        address token;
-        for (uint256 i = 0; i < path.length; i++) {
-            token = path[i];
-            require(isAllowedAsset(token), "Token not allowed");
-        }
-    }
-
-    // Validate Uniswap v3 trade
-    function validate_exactInput(bytes memory callData) internal view {
-        (ExactInputParams memory params) = abi.decode(
-            callData,
-            (ExactInputParams)
-        );
-        require(
-            isAllowedReceiver(params.recipient),
-            "Receiver not whitelisted"
-        );
-        validateUniswapV3Path(params.path);
-    }
-
-    function validate_exactOutput(bytes memory callData) internal view {
-        (ExactOutputParams memory params) = abi.decode(
-            callData,
-            (ExactOutputParams)
-        );
-        require(
-            isAllowedReceiver(params.recipient),
-            "Receiver not whitelisted"
-        );
-        validateUniswapV3Path(params.path);
-    }
-
-    // Validate Uniswap SwapRouter02 (IV3SwapRouter) exactInput trade.
-    //
-    // SwapRouter02 uses a different struct layout (no deadline field) than
-    // the original SwapRouter. The recipient must be validated to prevent
-    // the asset manager from routing swap output to a non-whitelisted address.
-    // When anyAsset is false, the token path is also validated.
-    function validate_exactInputRouter02(bytes memory callData) internal view {
-        (ExactInputParamsRouter02 memory params) = abi.decode(
-            callData,
-            (ExactInputParamsRouter02)
-        );
-        require(
-            isAllowedReceiver(params.recipient),
-            "Receiver not whitelisted"
-        );
-        if (!anyAsset) {
-            validateUniswapV3Path(params.path);
-        }
-    }
-
-    function validateUniswapV3Path(bytes memory path) internal view {
-        address tokenIn;
-        address tokenOut;
-        while (true) {
-            (tokenOut, tokenIn, ) = path.decodeFirstPool();
-            require(isAllowedAsset(tokenIn), "Token not allowed");
-            require(isAllowedAsset(tokenOut), "Token not allowed");
-            if (path.hasMultiplePools()) {
-                path = path.skipToken();
-            } else {
-                break;
-            }
         }
     }
 
@@ -888,7 +756,7 @@ abstract contract GuardV0Base is IGuard, Multicall {
      * - ERC-4626 withdrawal address must be always the Safe
      * - Because of non-standardisation the whitelisted function list is long
      */
-    function whitelistERC4626(address vault, string calldata notes) external {
+    function whitelistERC4626(address vault, string calldata notes) external onlyGuardOwner {
         IERC4626 vault_ = IERC4626(vault);
         address denominationToken = vault_.asset();
         address shareToken = vault;
@@ -941,7 +809,7 @@ abstract contract GuardV0Base is IGuard, Multicall {
     function whitelistAaveV3(
         address lendingPool,
         string calldata notes
-    ) external {
+    ) external onlyGuardOwner {
         allowCallSite(lendingPool, SEL_AAVE_SUPPLY, notes);
         allowCallSite(lendingPool, SEL_AAVE_WITHDRAW, notes);
         allowApprovalDestination(lendingPool, notes);
@@ -956,7 +824,7 @@ abstract contract GuardV0Base is IGuard, Multicall {
         address settlementContract,
         address relayerContract,
         string calldata notes
-    ) external {
+    ) external onlyGuardOwner {
         // Interaction by special _swapAndValidateCowSwap() internal function
         allowApprovalDestination(settlementContract, notes);
         allowApprovalDestination(relayerContract, notes);
@@ -1122,41 +990,6 @@ abstract contract GuardV0Base is IGuard, Multicall {
         string calldata notes
     ) external onlyGuardOwner {
         HypercoreVaultLib.removeHypercoreVault(vault, notes);
-    }
-
-    // Validate a GMX multicall payload.
-    //
-    // Delegates parsing, decoding, and GMX-internal checks (router, orderVault,
-    // markets) to GmxLib. The library returns arrays of addresses that need
-    // cross-cutting checks (isAllowedAsset, isAllowedReceiver) which only the
-    // main contract can perform (since it owns the asset/receiver storage).
-    //
-    function _validate_gmxMulticall(
-        address exchangeRouter,
-        bytes calldata callData
-    ) internal view {
-        require(GmxLib.isDeployed(), "GmxLib not linked");
-        (
-            address[] memory assets,
-            address[] memory receivers,
-            address[] memory markets
-        ) = GmxLib.validateMulticall(exchangeRouter, callData, anyAsset);
-
-        for (uint256 i = 0; i < assets.length; i++) {
-            require(isAllowedAsset(assets[i]), "GMX: asset not allowed");
-        }
-        for (uint256 i = 0; i < receivers.length; i++) {
-            require(
-                isAllowedReceiver(receivers[i]),
-                "GMX: receiver not allowed"
-            );
-        }
-        for (uint256 i = 0; i < markets.length; i++) {
-            require(
-                GmxLib.isAllowedMarket(markets[i], anyAsset),
-                "GMX: market not allowed"
-            );
-        }
     }
 
     // Validate CCTP depositForBurn call parameters.
