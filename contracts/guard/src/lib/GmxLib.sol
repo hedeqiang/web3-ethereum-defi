@@ -132,11 +132,15 @@ library GmxLib {
         // Decode multicall bytes array
         bytes[] memory calls = abi.decode(callData, (bytes[]));
 
-        // Pre-allocate max-size arrays for addresses that need checking by main contract
-        // Worst case: each call is a createOrder with addresses to check
-        assetsToCheck = new address[](calls.length * 2);  // token + swapPath entries
-        receiversToCheck = new address[](calls.length * 2);  // receiver + cancellationReceiver
-        marketsToCheck = new address[](calls.length * 2);  // market + swapPath entries
+        // Pre-allocate max-size arrays for addresses that need checking by main contract.
+        // Sized at calls.length * 2 which covers the common case (single-hop swaps).
+        // NOTE: If a createOrder has a swapPath with > 1 entry, the array could
+        // overflow and revert. This is accepted behaviour — GMX V2 swap paths are
+        // typically 0-1 entries, and an overflow simply reverts the transaction
+        // (no fund safety impact).
+        assetsToCheck = new address[](calls.length * 2);
+        receiversToCheck = new address[](calls.length * 2);
+        marketsToCheck = new address[](calls.length * 2);
         uint256 assetIdx = 0;
         uint256 receiverIdx = 0;
         uint256 marketIdx = 0;

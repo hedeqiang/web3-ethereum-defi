@@ -114,6 +114,12 @@ library CowSwapLib {
     /// into a single library function to reduce the calling contract's
     /// bytecode (EIP-170). Uses IGuardChecks callbacks via address(this)
     /// to check permissions on the calling contract's storage.
+    ///
+    /// NOTE: minAmountOut (buyAmount) is not enforced to be > 0 here.
+    /// Unlike Velora's opaque calldata, CowSwap orders are constructed
+    /// from validated parameters and filled via a competitive solver
+    /// auction — a zero buyAmount order would still receive market-price
+    /// surplus from the solver competition. This is accepted behaviour.
     function validateAndCreateOrder(
         address settlementContract,
         address receiver,

@@ -67,7 +67,7 @@ contract SimpleVaultV0 is Ownable {
      * Emergency pause set by the governance. Disable with updateAssetManager().
      */
     function isDisabled() public view returns (bool) {
-        return assetManager != address(0);
+        return assetManager == address(0);
     }
 
     /**

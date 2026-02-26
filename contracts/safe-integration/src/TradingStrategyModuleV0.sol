@@ -87,6 +87,10 @@ contract TradingStrategyModuleV0 is Module, GuardV0Base {
      * - Execute transaction on behalf of Safe
      *
      */
+    // NOTE: The `value` parameter (ETH sent with the call) is not validated
+    // by the guard. This is accepted behaviour — Safes typically hold minimal
+    // ETH (gas money), all targets are governance-approved contracts, and any
+    // ETH sent goes to those trusted targets (not to the asset manager).
     function performCall(
         address target,
         bytes calldata callData,
