@@ -64,6 +64,7 @@ poetry run ruff format
 
 ## Pull requests
 
+- Only commit and push when asked. Never commit without explicit permission.
 - Never push directly to a master, and open a pull request when asked.
 - Do not include test plan in a pull request description
 - If the user ask to open a pull request as feature then start the PR title with "feat:" prefix and also add one line about the feature into `CHANGELOG.md`
