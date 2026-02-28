@@ -15,6 +15,7 @@ from web3 import Web3
 from web3.contract import Contract
 
 from eth_defi.abi import ZERO_ADDRESS, get_contract, get_contract_with_forge_libraries
+from eth_defi.hotwallet import HotWallet
 from eth_defi.tx import get_tx_broadcast_data
 
 #: Default library addresses for deploying guard contracts (SimpleVaultV0, TradingStrategyModuleV0).
@@ -93,7 +94,7 @@ class ContractDeploymentFailed(Exception):
 def deploy_contract(
     web3: Web3,
     contract: Union[str, Contract],
-    deployer: str | LocalAccount,
+    deployer: str | LocalAccount | HotWallet,
     *constructor_args,
     register_for_tracing=True,
     gas: int = None,
@@ -192,11 +193,19 @@ def deploy_contract(
         Contract = contract
         contract_name = None
 
-    if isinstance(deployer, LocalAccount):
-        # Sign locally
-        nonce = web3.eth.get_transaction_count(deployer.address)
+    if isinstance(deployer, (HotWallet, LocalAccount)):
+        # Normalise deployer to (nonce, LocalAccount).
+        # HotWallet uses its internal nonce counter (avoids stale reads
+        # from load-balanced RPCs); plain LocalAccount reads from chain.
+        if isinstance(deployer, HotWallet):
+            nonce = deployer.allocate_nonce()
+            local_account = deployer.account
+        else:
+            nonce = web3.eth.get_transaction_count(deployer.address)
+            local_account = deployer
+
         tx_params = {
-            "from": deployer.address,
+            "from": local_account.address,
             "nonce": nonce,
             "chainId": web3.eth.chain_id,
         }
@@ -204,7 +213,7 @@ def deploy_contract(
             tx_params["gas"] = gas
         tx_data = Contract.constructor(*constructor_args).build_transaction(tx_params)
 
-        signed_tx = deployer.sign_transaction(tx_data)
+        signed_tx = local_account.sign_transaction(tx_data)
         raw_bytes = get_tx_broadcast_data(signed_tx)
         tx_hash = web3.eth.send_raw_transaction(raw_bytes)
     else:
