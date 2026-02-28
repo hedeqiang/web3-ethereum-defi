@@ -43,7 +43,7 @@ def describe_gmx() -> dict:
             "borrowMargin": None,
             "cancelAllOrders": False,
             "cancelAllOrdersWs": None,
-            "cancelOrder": False,  # Requires contract integration
+            "cancelOrder": True,  # Cancels pending DataStore limit orders
             "cancelOrderWithClientOrderId": None,
             "cancelOrderWs": None,
             "cancelOrders": None,
@@ -52,11 +52,11 @@ def describe_gmx() -> dict:
             "closeAllPositions": None,
             "closePosition": None,
             "createDepositAddress": None,
-            "createLimitBuyOrder": False,
+            "createLimitBuyOrder": True,  # delegates to createLimitOrder with side='buy'
             "createLimitBuyOrderWs": None,
             "createLimitOrder": True,  #  (returns unsigned tx or auto-signs)
             "createLimitOrderWs": None,
-            "createLimitSellOrder": False,
+            "createLimitSellOrder": True,  # delegates to createLimitOrder with side='sell'
             "createLimitSellOrderWs": None,
             "createMarketBuyOrder": True,  #  (returns unsigned tx or auto-signs)
             "createMarketBuyOrderWs": None,
@@ -113,7 +113,7 @@ def describe_gmx() -> dict:
             "fetchCanceledAndClosedOrders": None,
             "fetchCanceledOrders": None,
             "fetchClosedOrder": None,
-            "fetchClosedOrders": None,
+            "fetchClosedOrders": False,  # raises NotSupported - use fetch_my_trades() instead
             "fetchClosedOrdersWs": None,
             "fetchConvertCurrencies": None,
             "fetchConvertQuote": None,
@@ -180,7 +180,7 @@ def describe_gmx() -> dict:
             "fetchOrderBook": False,  # GMX uses liquidity pools, not order books
             "fetchOrderBooks": None,
             "fetchOrderBookWs": None,
-            "fetchOrders": None,
+            "fetchOrders": True,  # Returns pending DataStore limit orders
             "fetchOrdersByStatus": None,
             "fetchOrdersWs": None,
             "fetchOrderTrades": None,

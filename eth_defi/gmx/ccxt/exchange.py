@@ -33,15 +33,26 @@ from typing import Any
 
 from ccxt.base.errors import BaseError, ExchangeError, InvalidOrder, NotSupported, OrderNotFound
 from eth_utils import to_checksum_address
+from web3.exceptions import Web3RPCError
 
 from eth_defi.ccxt.exchange_compatible import ExchangeCompatible
 from eth_defi.chain import get_chain_name
 from eth_defi.gmx.api import GMXAPI
 from eth_defi.gmx.cache import GMXMarketCache
+from eth_defi.gmx.ccxt.cancel_helpers import build_cancel_order_response, resolve_order_id
 from eth_defi.gmx.ccxt.properties import describe_gmx
 from eth_defi.gmx.ccxt.validation import _validate_ohlcv_data_sufficiency
 from eth_defi.gmx.config import GMXConfig
-from eth_defi.gmx.constants import DEFAULT_GAS_CRITICAL_THRESHOLD_USD, DEFAULT_GAS_ESTIMATE_BUFFER, DEFAULT_GAS_MONITOR_ENABLED, DEFAULT_GAS_RAISE_ON_CRITICAL, DEFAULT_GAS_WARNING_THRESHOLD_USD, GMX_MIN_COST_USD, PRECISION
+from eth_defi.gmx.constants import (
+    DEFAULT_GAS_CRITICAL_THRESHOLD_USD,
+    DEFAULT_GAS_ESTIMATE_BUFFER,
+    DEFAULT_GAS_MONITOR_ENABLED,
+    DEFAULT_GAS_RAISE_ON_CRITICAL,
+    DEFAULT_GAS_WARNING_THRESHOLD_USD,
+    GMX_MIN_COST_USD,
+    PRECISION,
+    _MIN_LOG_CHUNK_BLOCKS,
+)
 from eth_defi.gmx.contracts import get_contract_addresses, get_token_address_normalized
 from eth_defi.gmx.core.markets import Markets
 from eth_defi.gmx.core.open_positions import GetOpenPositions
@@ -49,17 +60,62 @@ from eth_defi.gmx.core.oracle import OraclePrices
 from eth_defi.gmx.events import decode_gmx_event, extract_order_execution_result, extract_order_key_from_receipt
 from eth_defi.gmx.gas_monitor import GasMonitorConfig, GMXGasMonitor, InsufficientGasError
 from eth_defi.gmx.graphql.client import GMXSubsquidClient
-from eth_defi.gmx.order import SLTPEntry, SLTPOrder, SLTPParams
-from eth_defi.gmx.order_tracking import check_order_status
+from eth_defi.gmx.order.cancel_order import CancelOrder
+from eth_defi.gmx.order.pending_orders import PendingOrder, fetch_pending_orders
+from eth_defi.gmx.order.sltp_order import SLTPEntry, SLTPOrder, SLTPParams
+from eth_defi.gmx.order_tracking import check_order_status, is_order_pending
 from eth_defi.gmx.trading import GMXTrading
 from eth_defi.gmx.utils import calculate_estimated_liquidation_price, convert_raw_price_to_usd
 from eth_defi.hotwallet import HotWallet
-from eth_defi.provider.fallback import get_fallback_provider
+from eth_defi.provider.fallback import ExtraValueError, get_fallback_provider
 from eth_defi.provider.log_block_range import get_logs_max_block_range
 from eth_defi.provider.multi_provider import create_multi_provider_web3
 from eth_defi.token import fetch_erc20_details
 
 logger = logging.getLogger(__name__)
+
+
+def _get_logs_adaptive(web3, address: str, from_block: int, to_block: int) -> list:
+    """Fetch eth_getLogs, splitting into smaller sub-ranges when the log-count limit is exceeded.
+
+    Some RPC providers (e.g. Alchemy) cap the number of log *entries* per query at 10,000
+    regardless of the block range.  When the GMX EventEmitter is busy a single 10,000-block
+    chunk can contain more than 10,000 events, causing the provider to return an error instead
+    of truncating results.
+
+    This helper catches that error and recursively bisects the block range until each
+    sub-range fits within the provider limit.
+
+    :param web3: Web3 instance.
+    :param address: Contract address to filter logs by.
+    :param from_block: Start block (inclusive).
+    :param to_block: End block (inclusive).
+    :returns: Combined list of log entries across all sub-ranges.
+    :raises ExtraValueError: Re-raised when the range is already at the minimum and still overflows.
+    """
+    try:
+        return web3.eth.get_logs(
+            {
+                "address": address,
+                "fromBlock": from_block,
+                "toBlock": to_block,
+            }
+        )
+    except ExtraValueError as exc:
+        payload = exc.args[0] if exc.args else {}
+        msg = payload.get("message", "") if isinstance(payload, dict) else str(payload)
+        if "exceeds limit" in msg and to_block > from_block and (to_block - from_block) >= _MIN_LOG_CHUNK_BLOCKS:
+            mid = (from_block + to_block) // 2
+            logger.debug(
+                "Log count exceeded for blocks %d-%d, bisecting at block %d",
+                from_block,
+                to_block,
+                mid,
+            )
+            left = _get_logs_adaptive(web3, address, from_block, mid)
+            right = _get_logs_adaptive(web3, address, mid + 1, to_block)
+            return left + right
+        raise
 
 
 def _scan_logs_chunked_for_trade_action(
@@ -113,13 +169,7 @@ def _scan_logs_chunked_for_trade_action(
         )
 
         try:
-            logs = web3.eth.get_logs(
-                {
-                    "address": event_emitter,
-                    "fromBlock": chunk_start,
-                    "toBlock": chunk_end,
-                }
-            )
+            logs = _get_logs_adaptive(web3, event_emitter, chunk_start, chunk_end)
 
             for log in logs:
                 try:
@@ -3440,6 +3490,85 @@ class GMX(ExchangeCompatible):
             "info": position,
         }
 
+    def _market_address_to_symbol(self, market_address: str) -> str | None:
+        """Map a GMX market contract address to a unified CCXT symbol.
+
+        Iterates loaded markets to find the one whose ``market_token`` matches
+        the given address.
+
+        :param market_address:
+            Checksummed or lowercase market contract address.
+        :return:
+            Unified symbol string (e.g. ``"ETH/USDC:USDC"``) or ``None`` if not found.
+        """
+        addr_lower = market_address.lower()
+        for mkt_symbol, mkt in self.markets.items():
+            info = mkt.get("info") or {}
+            if info.get("market_token", "").lower() == addr_lower:
+                return mkt_symbol
+        return None
+
+    def _pending_order_to_ccxt(self, order: PendingOrder, symbol: str | None = None) -> dict:
+        """Convert a :class:`~eth_defi.gmx.order.pending_orders.PendingOrder` to CCXT format.
+
+        :param order:
+            Pending limit order fetched from the GMX DataStore.
+        :param symbol:
+            Unified symbol override; resolved from the market address if not provided.
+        :return:
+            CCXT-compatible order dict with ``status="open"``.
+        """
+        order_key_hex = "0x" + order.order_key.hex()
+
+        if symbol is None:
+            symbol = self._market_address_to_symbol(order.market)
+
+        if order.is_stop_loss:
+            # Use "stopLoss" (camelCase) rather than "stop_loss" — the underscore
+            # in "stop_loss" is interpreted as an italic marker in Telegram MarkdownV1,
+            # causing "Can't parse entities" errors in freqtrade Telegram notifications.
+            order_type = "stopLoss"
+        elif order.is_take_profit:
+            order_type = "take_profit"
+        else:
+            order_type = "limit"
+
+        size_usd = order.size_delta_usd_human
+        trigger = order.trigger_price_usd
+
+        return {
+            "id": order_key_hex,
+            "clientOrderId": None,
+            "timestamp": order.updated_at_time * 1000,
+            "datetime": self.iso8601(order.updated_at_time * 1000),
+            "lastTradeTimestamp": None,
+            "status": "open",
+            "symbol": symbol,
+            "type": order_type,
+            "timeInForce": None,
+            "side": "buy" if order.is_long else "sell",
+            "price": trigger,
+            "amount": size_usd,
+            "filled": 0.0,
+            "remaining": size_usd,
+            "cost": None,
+            "trades": [],
+            "fee": None,
+            "info": {
+                "order_key": order_key_hex,
+                "order_type": order.order_type.name,
+                "market": order.market,
+                "is_long": order.is_long,
+                "trigger_price_usd": trigger,
+                "size_delta_usd": size_usd,
+                "execution_fee": order.execution_fee,
+                "is_frozen": order.is_frozen,
+                "auto_cancel": order.auto_cancel,
+            },
+            "average": None,
+            "fees": [],
+        }
+
     def fetch_open_orders(
         self,
         symbol: str = None,
@@ -3447,26 +3576,35 @@ class GMX(ExchangeCompatible):
         limit: int = None,
         params: dict = None,
     ) -> list[dict]:
-        """
-        Fetch open orders (positions) for the account.
+        """Fetch open orders for the account.
 
-        In GMX, open positions are treated as "open orders".
-        Requires user_wallet_address to be set in GMXConfig.
+        By default, returns current open **positions** formatted as CCXT orders
+        (the original GMX behaviour). Pass ``params={"pending_orders_only": True}``
+        to return only pending DataStore limit orders (stop loss, take profit,
+        limit increase) instead.
 
-        :param symbol: Filter by symbol (optional)
-        :param since: Not used (GMX returns current positions)
-        :param limit: Maximum number of orders to return
-        :param params: Optional parameters
-            - wallet_address: Override default wallet address
-        :return: List of CCXT-formatted orders
+        :param symbol: Filter by symbol (optional).
+        :param since: Not used.
+        :param limit: Maximum number of results.
+        :param params:
+            Optional parameters:
+
+            - ``wallet_address`` (str): Override default wallet address.
+            - ``pending_orders_only`` (bool): Return pending limit orders only (default: ``False``).
+
+        :return: List of CCXT-formatted orders.
 
         Example::
 
             # Initialize with wallet address
             config = GMXConfig(web3, user_wallet_address="0x...")
             gmx = GMX(config)
+
+            # Default: returns open positions as orders
             orders = gmx.fetch_open_orders()
-            eth_orders = gmx.fetch_open_orders(symbol="ETH/USD")
+
+            # Pending DataStore limit orders only (SL, TP, limit increase)
+            pending = gmx.fetch_open_orders(params={"pending_orders_only": True})
         """
         params = params or {}
         self.load_markets()
@@ -3476,11 +3614,32 @@ class GMX(ExchangeCompatible):
         if not wallet:
             raise ValueError("wallet_address must be provided in GMXConfig or params")
 
-        # Fetch open positions
+        pending_orders_only = params.get("pending_orders_only", False)
+
+        if pending_orders_only:
+            # Return pending DataStore limit orders (SL, TP, limit increase)
+            chain = self.config.get_chain()
+            result = []
+            for order in fetch_pending_orders(self.web3, chain, wallet):
+                try:
+                    ccxt_order = self._pending_order_to_ccxt(order)
+                    # Apply symbol filter
+                    if symbol and ccxt_order.get("symbol"):
+                        normalized_input = self._normalize_symbol(symbol)
+                        if ccxt_order["symbol"] != normalized_input:
+                            continue
+                    result.append(ccxt_order)
+                except Exception as exc:
+                    logger.warning("Could not convert pending order %s to CCXT format: %s", order.order_key.hex()[:16], exc)
+
+            if limit:
+                result = result[:limit]
+            return result
+
+        # Default: return open positions as orders
         positions_manager = GetOpenPositions(self.config)
         positions = positions_manager.get_data(wallet)
 
-        # Parse to CCXT orders
         result = []
         for position_key, position_data in positions.items():
             try:
@@ -4819,22 +4978,46 @@ class GMX(ExchangeCompatible):
         timestamp = self.milliseconds()
         tx_success = receipt.get("status") == 1
 
+        # Extract the GMX order_key from the receipt so that cancel_order() and
+        # fetch_order() can use it.  The order_key is stored by the GMX DataStore
+        # and is distinct from the tx hash — cancel_order must send the order_key,
+        # not the tx hash.
+        order_key_hex: str | None = None
+        if tx_success:
+            try:
+                order_key_bytes = extract_order_key_from_receipt(self.web3, receipt)
+                if order_key_bytes:
+                    order_key_hex = "0x" + order_key_bytes.hex()
+                    logger.debug(
+                        "Extracted order_key=%s from standalone %s tx=%s",
+                        order_key_hex[:18],
+                        type,
+                        tx_hash.hex()[:16],
+                    )
+            except Exception as e:
+                logger.warning("Could not extract order_key from standalone %s receipt: %s", type, e)
+
+        # GMX uses a two-phase model: the on-chain tx only registers the order in the
+        # DataStore; the keeper executes it later when the trigger price is hit.
+        # Returning "closed" here would make freqtrade mark ft_is_open=False immediately,
+        # causing it to think no SL exists and create a duplicate on every bot loop.
+        # Use "open" to signal the order is placed and waiting for trigger execution.
         order = {
             "id": tx_hash.hex(),
             "clientOrderId": None,
             "timestamp": timestamp,
             "datetime": self.iso8601(timestamp),
-            "lastTradeTimestamp": timestamp if tx_success else None,
+            "lastTradeTimestamp": None,
             "symbol": symbol,
             "type": type,
             "side": side,
             "price": trigger_price,
             "amount": amount,
-            "cost": amount if tx_success else None,
-            "average": trigger_price if tx_success else None,
-            "filled": amount if tx_success else 0.0,
-            "remaining": 0.0 if tx_success else amount,
-            "status": "closed" if tx_success else "canceled",
+            "cost": None,
+            "average": None,
+            "filled": 0.0,
+            "remaining": amount,
+            "status": "open" if tx_success else "canceled",
             "fee": {
                 "cost": result.execution_fee / 10**18,
                 "currency": "ETH",
@@ -4848,17 +5031,23 @@ class GMX(ExchangeCompatible):
                 "execution_fee": result.execution_fee,
                 "trigger_price": trigger_price,
                 "order_type": type,
+                "order_key": order_key_hex,  # Used by cancel_order() and fetch_order()
                 "receipt": receipt,
             },
         }
 
+        # Cache the order so that fetch_order(tx_hash) and cancel_order(tx_hash)
+        # can find the real order_key via info["order_key"] without re-parsing the receipt.
+        self._orders[tx_hash.hex()] = order
+
         logger.info(
-            "Created standalone %s order for %s: trigger=%.2f, amount=%.2f USD, tx=%s",
+            "Created standalone %s order for %s: trigger=%.2f, amount=%.2f USD, tx=%s, order_key=%s",
             type,
             symbol,
             trigger_price,
             amount,
-            tx_hash.hex(),
+            tx_hash.hex()[:16],
+            order_key_hex[:18] if order_key_hex else "unknown",
         )
 
         return order
@@ -5213,9 +5402,15 @@ class GMX(ExchangeCompatible):
                 monitor.log_gas_check_warning(gas_check)
                 if gas_config.raise_on_critical:
                     raise InsufficientGasError(gas_check.message, gas_check)
-                # Return failed order dict instead of crashing
+                # Return failed order dict instead of crashing.
+                # Use a unique timestamp-based ID so that freqtrade can INSERT
+                # multiple rejected orders for the same pair without hitting the
+                # UNIQUE constraint on (ft_pair, order_id).  A Python None here
+                # gets stringified to the literal "None" by SQLAlchemy, which
+                # causes IntegrityError on the second rejection for the same pair.
+                _rejected_id = f"gas_rejected_{symbol.replace('/', '_').replace(':', '_')}_{self.milliseconds()}"
                 return {
-                    "id": None,
+                    "id": _rejected_id,
                     "clientOrderId": None,
                     "datetime": self.iso8601(self.milliseconds()),
                     "timestamp": self.milliseconds(),
@@ -5591,10 +5786,79 @@ class GMX(ExchangeCompatible):
                 # or some other ValueError that should be re-raised
                 error_msg = str(e)
                 if "No long position found" in error_msg or "position was already closed" in error_msg:
-                    # This is the race condition - position was already closed
-                    logger.warning("Caught position-not-found error for %s: %s. Position likely closed by stop-loss. Returning synthetic 'closed' order.", symbol, error_msg)
+                    # The position was already closed before our market-sell arrived.
+                    # Query Subsquid to find what actually closed it and return real data.
+                    logger.warning(
+                        "Position for %s not found on-chain — querying Subsquid for actual close event.",
+                        symbol,
+                    )
 
-                    # Get current mark price for cost calculation
+                    close_info = None
+                    market_info = self.markets.get(symbol, {}).get("info", {})
+                    market_address = market_info.get("market_token")
+                    is_long = side != "sell"  # we were trying to close a long (sell side)
+
+                    if market_address and hasattr(self, "subsquid") and self.subsquid:
+                        try:
+                            close_info = self.subsquid.get_latest_position_close(
+                                account=self.wallet.address,
+                                market_address=market_address,
+                                is_long=is_long,
+                                max_wait_seconds=10.0,
+                            )
+                        except Exception as sq_err:
+                            logger.warning("Subsquid lookup failed for %s: %s", symbol, sq_err)
+
+                    if close_info:
+                        exec_price = close_info["execution_price"]
+                        fees_usd = close_info["fees_usd"]
+                        order_key = close_info["order_key"]
+                        order_type = close_info["order_type"]
+                        timestamp = close_info["timestamp_ms"] or self.milliseconds()
+                        order_id = f"subsquid_{order_key[-16:] if order_key else timestamp}"
+
+                        logger.info(
+                            "Position for %s closed by %s at %.6f — returning verified order id=%s",
+                            symbol,
+                            order_type,
+                            exec_price,
+                            order_id,
+                        )
+                        verified_order = {
+                            "id": order_id,
+                            "clientOrderId": order_key or None,
+                            "timestamp": timestamp,
+                            "datetime": self.iso8601(timestamp),
+                            "lastTradeTimestamp": timestamp,
+                            "symbol": symbol,
+                            "type": type,
+                            "side": side,
+                            "price": exec_price,
+                            "amount": amount,
+                            "cost": amount * exec_price if exec_price else 0,
+                            "average": exec_price,
+                            "filled": amount,
+                            "remaining": 0.0,
+                            "status": "closed",
+                            "fee": {"cost": fees_usd, "currency": "USDC"},
+                            "trades": [],
+                            "info": {
+                                "reason": order_type,
+                                "order_key": order_key,
+                                "pnl_usd": close_info.get("pnl_usd"),
+                                "tx_hash": close_info.get("tx_hash"),
+                                "block": close_info.get("block"),
+                                "message": error_msg,
+                            },
+                        }
+                        self._orders[verified_order["id"]] = verified_order
+                        return verified_order
+
+                    # Subsquid returned nothing — fall back to synthetic order with mark price.
+                    logger.warning(
+                        "Subsquid returned no close event for %s — falling back to synthetic order.",
+                        symbol,
+                    )
                     try:
                         ticker = self.fetch_ticker(symbol)
                         mark_price = ticker.get("last") or ticker.get("close")
@@ -5602,7 +5866,6 @@ class GMX(ExchangeCompatible):
                         logger.warning("Failed to fetch ticker for synthetic order price: %s", ticker_error)
                         mark_price = None
 
-                    # Return synthetic closed order
                     timestamp = self.milliseconds()
                     synthetic_order = {
                         "id": f"already_closed_{timestamp}",
@@ -5613,10 +5876,10 @@ class GMX(ExchangeCompatible):
                         "symbol": symbol,
                         "type": type,
                         "side": side,
-                        "price": mark_price,  # Current mark price (approximation)
+                        "price": mark_price,
                         "amount": amount,
-                        "cost": amount * mark_price if mark_price else 0,  # Cost in stake currency = amount * price
-                        "average": mark_price,  # Average fill price (approximation)
+                        "cost": amount * mark_price if mark_price else 0,
+                        "average": mark_price,
                         "filled": amount,
                         "remaining": 0.0,
                         "status": "closed",
@@ -5628,7 +5891,6 @@ class GMX(ExchangeCompatible):
                             "requested_close_size_usd": gmx_params.get("size_delta_usd"),
                         },
                     }
-                    # Add synthetic order to cache for consistency
                     self._orders[synthetic_order["id"]] = synthetic_order
                     return synthetic_order
                 else:
@@ -5660,8 +5922,8 @@ class GMX(ExchangeCompatible):
 
         signed_tx = self.wallet.sign_transaction_with_new_nonce(transaction)
 
-        # Submit to blockchain
-        tx_hash_bytes = self.web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        # Submit to blockchain (nonce errors auto-recovered by helper)
+        tx_hash_bytes = self._send_signed_tx_with_nonce_recovery(transaction, signed_tx, "create_order")
         tx_hash = self.web3.to_hex(tx_hash_bytes)  # Use to_hex to include "0x" prefix
 
         # Wait for confirmation
@@ -6336,21 +6598,250 @@ class GMX(ExchangeCompatible):
                 failure_count,
             )
 
+    def _send_signed_tx_with_nonce_recovery(
+        self,
+        transaction: dict,
+        signed_tx,
+        context: str = "transaction",
+    ) -> bytes:
+        """Send a signed transaction, recovering from nonce-sync errors with one retry.
+
+        :param transaction:
+            Transaction dict as returned by the order builder, already passed through
+            :meth:`~eth_defi.hotwallet.HotWallet.sign_transaction_with_new_nonce` by the
+            caller.  The helper never mutates the caller's dict — the retry path works
+            on an internal copy.
+        :param signed_tx:
+            The already-signed transaction returned by
+            ``wallet.sign_transaction_with_new_nonce()``.
+        :param context:
+            Short description used only for the warning log message (e.g. ``"cancel_order"``).
+        :return:
+            Raw transaction hash bytes from the RPC.
+        :raises Web3RPCError:
+            Re-raised for any error that is not a nonce mismatch.
+        """
+        try:
+            return self.web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        except Web3RPCError as e:
+            err = str(e).lower()
+            if "nonce too high" in err:
+                # Wallet counter got ahead of the chain (tx was built but never sent).
+                on_chain_nonce = self.web3.eth.get_transaction_count(self.wallet.address)
+                logger.warning(
+                    "Nonce too high in %s (signed %d, chain at %d) – resyncing and retrying",
+                    context,
+                    signed_tx.nonce,
+                    on_chain_nonce,
+                )
+                # Direct assignment bypasses sync_nonce()'s stale-read guard —
+                # the RPC error confirms the on-chain state is authoritative.
+                self.wallet.current_nonce = on_chain_nonce
+            elif "nonce too low" in err:
+                # Wallet counter behind the chain (external tx mined, or mempool race).
+                # Use "pending" to account for already-queued transactions.
+                on_chain_nonce = self.web3.eth.get_transaction_count(self.wallet.address, "pending")
+                logger.warning(
+                    "Nonce too low in %s (signed %d, chain pending at %d) – resyncing and retrying",
+                    context,
+                    signed_tx.nonce,
+                    on_chain_nonce,
+                )
+                # Direct assignment bypasses sync_nonce()'s stale-read guard —
+                # the RPC error confirms the on-chain state is authoritative.
+                self.wallet.current_nonce = on_chain_nonce
+            else:
+                raise
+
+            # Re-sign with the corrected nonce and retry once.
+            # Use a shallow copy so the caller's dict is never mutated.
+            retry_tx = {k: v for k, v in transaction.items() if k != "nonce"}
+            signed_tx = self.wallet.sign_transaction_with_new_nonce(retry_tx)
+            try:
+                return self.web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            except Web3RPCError as retry_err:
+                raise Web3RPCError(f"Nonce recovery retry failed in {context} (original error: {err!r}): {retry_err}") from retry_err
+
     def cancel_order(
         self,
         id: str,
         symbol: str | None = None,
         params: dict | None = None,
-    ):
-        """Cancel an order.
+    ) -> dict:
+        """Cancel a pending limit order (stop loss, take profit, or limit increase).
 
-        Not supported by GMX - orders execute immediately via keeper system.
+        Only pending limit orders stored in the GMX DataStore can be cancelled.
+        Market orders execute immediately via keepers and are not cancellable.
 
-        :raises NotSupported: GMX doesn't support order cancellation
+        :param id:
+            Order key as a hex string (``"0x..."`` or bare hex). Obtained from
+            :func:`~eth_defi.gmx.order.pending_orders.fetch_pending_orders` or
+            from a previous SL/TP order creation response.
+        :param symbol:
+            Symbol (not used, included for CCXT compatibility).
+        :param params:
+            Additional parameters (not used).
+        :return:
+            CCXT-compatible order dict with ``status="cancelled"``.
+        :raises ValueError:
+            If wallet not configured.
+        :raises OrderNotFound:
+            If the order key does not exist in the DataStore.
+        :raises ExchangeError:
+            If the cancel transaction reverts on-chain.
         """
-        raise NotSupported(
-            self.id + " cancel_order() is not supported - GMX orders are executed immediately by keepers and cannot be cancelled. Orders either execute or revert if conditions aren't met.",
+        if not self.wallet:
+            raise ValueError(
+                "Wallet required for order cancellation. Provide 'privateKey' or 'wallet' in constructor parameters.",
+            )
+
+        id, order_key = resolve_order_id(self._orders, id, "cancel_order")
+
+        chain = self.config.get_chain()
+
+        # Verify the order exists in the DataStore
+        if not is_order_pending(self.web3, order_key, chain):
+            raise OrderNotFound(
+                f"{self.id} order {id} not found in DataStore (may have already been executed or cancelled).",
+            )
+
+        logger.info("Cancelling limit order %s with execution_buffer=%.1fx", id[:18], self.execution_buffer)
+
+        # Build unsigned cancel transaction
+        canceller = CancelOrder(self.config)
+        result = canceller.cancel_order(order_key, execution_buffer=self.execution_buffer)
+
+        # Sign (wallet manages nonce internally)
+        transaction = dict(result.transaction)
+        if "nonce" in transaction:
+            del transaction["nonce"]
+
+        signed_tx = self.wallet.sign_transaction_with_new_nonce(transaction)
+
+        # Submit and wait for on-chain confirmation (nonce errors auto-recovered)
+        tx_hash_bytes = self._send_signed_tx_with_nonce_recovery(transaction, signed_tx, "cancel_order")
+        tx_hash = self.web3.to_hex(tx_hash_bytes)
+        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash_bytes)
+
+        if receipt.get("status") == 0:
+            raise ExchangeError(
+                f"{self.id} cancel_order() transaction reverted on-chain: {tx_hash}",
+            )
+
+        logger.info("Order %s cancelled successfully: tx_hash=%s", id[:18], tx_hash)
+
+        return build_cancel_order_response(
+            order_id=id,
+            symbol=symbol,
+            tx_hash=tx_hash,
+            block_number=receipt.get("blockNumber"),
+            timestamp_ms=self.milliseconds(),
+            iso8601_fn=self.iso8601,
         )
+
+    def cancel_orders(
+        self,
+        ids: list[str],
+        symbol: str | None = None,
+        params: dict | None = None,
+    ) -> list[dict]:
+        """Cancel multiple pending limit orders in a single batch transaction.
+
+        Batches all ``cancelOrder`` calls into one ``multicall`` via
+        :class:`~eth_defi.gmx.order.cancel_order.CancelOrder`, which is more
+        gas-efficient than calling :meth:`cancel_order` in a loop.  The same
+        ``execution_buffer`` applied to individual cancels is used here.
+
+        :param ids:
+            List of order keys as hex strings (``"0x..."`` or bare hex).
+            Each may be a tx_hash (resolved to order_key via the orders
+            cache) or a raw DataStore order_key.
+        :param symbol:
+            Symbol (not used, included for CCXT compatibility).
+        :param params:
+            Additional parameters (not used).
+        :return:
+            List of CCXT-compatible order dicts with ``status="cancelled"``,
+            one per cancelled order.  All entries share the same ``tx_hash``
+            (single batch transaction on-chain).
+        :raises ValueError:
+            If *ids* is empty or wallet not configured.
+        :raises OrderNotFound:
+            If any order key does not exist in the DataStore.
+        :raises ExchangeError:
+            If the batch cancel transaction reverts on-chain.
+
+        .. note::
+            Each order key is validated via a separate ``is_order_pending()`` RPC
+            call before the batch transaction is built (O(N) sequential reads).
+            For large batches this can add noticeable latency.
+        """
+        if not ids:
+            raise ValueError("ids must not be empty")
+
+        if not self.wallet:
+            raise ValueError(
+                "Wallet required for order cancellation. Provide 'privateKey' or 'wallet' in constructor parameters.",
+            )
+
+        order_keys: list[bytes] = []
+        resolved_ids: list[str] = []
+        # Resolve once — chain never changes between iterations.
+        chain = self.config.get_chain()
+
+        for raw_id in ids:
+            raw_id, order_key = resolve_order_id(self._orders, raw_id, "cancel_orders")
+            if not is_order_pending(self.web3, order_key, chain):
+                raise OrderNotFound(
+                    f"{self.id} order {raw_id} not found in DataStore (may have already been executed or cancelled).",
+                )
+            order_keys.append(order_key)
+            resolved_ids.append(raw_id)
+
+        logger.info(
+            "Cancelling %d orders in batch with execution_buffer=%.1fx",
+            len(order_keys),
+            self.execution_buffer,
+        )
+
+        canceller = CancelOrder(self.config)
+        result = canceller.cancel_orders(order_keys, execution_buffer=self.execution_buffer)
+
+        transaction = dict(result.transaction)
+        if "nonce" in transaction:
+            del transaction["nonce"]
+
+        signed_tx = self.wallet.sign_transaction_with_new_nonce(transaction)
+
+        # Submit and wait for on-chain confirmation (nonce errors auto-recovered)
+        tx_hash_bytes = self._send_signed_tx_with_nonce_recovery(transaction, signed_tx, "cancel_orders")
+        tx_hash = self.web3.to_hex(tx_hash_bytes)
+        receipt = self.web3.eth.wait_for_transaction_receipt(tx_hash_bytes)
+
+        if receipt.get("status") == 0:
+            raise ExchangeError(
+                f"{self.id} cancel_orders() transaction reverted on-chain: {tx_hash}",
+            )
+
+        logger.info(
+            "%d orders cancelled in batch: tx_hash=%s",
+            len(order_keys),
+            tx_hash,
+        )
+
+        timestamp = self.milliseconds()
+        block_number = receipt.get("blockNumber")
+        return [
+            build_cancel_order_response(
+                order_id=resolved_id,
+                symbol=symbol,
+                tx_hash=tx_hash,
+                block_number=block_number,
+                timestamp_ms=timestamp,
+                iso8601_fn=self.iso8601,
+            )
+            for resolved_id in resolved_ids
+        ]
 
     def fetch_order(
         self,
@@ -6386,9 +6877,12 @@ class GMX(ExchangeCompatible):
             symbol,
         )
 
-        # Check if order exists in stored orders
-        if id in self._orders:
-            order = self._orders[id].copy()
+        # Check if order exists in stored orders.
+        # Handle 0x prefix mismatch: orders stored as tx_hash.hex() (no 0x) but
+        # freqtrade calls fetch_order with "0x{tx_hash}" (with 0x).
+        _cache_key = id if id in self._orders else id.removeprefix("0x")
+        if _cache_key in self._orders:
+            order = self._orders[_cache_key].copy()
             logger.info(
                 "ORDER_TRACE: fetch_order(%s) - FOUND IN CACHE - status=%s, filled=%.8f, remaining=%.8f",
                 id[:16],
@@ -6404,7 +6898,7 @@ class GMX(ExchangeCompatible):
                 logger.warning("fetch_order(%s): no order_key stored, cannot check execution status", id[:16])
                 return order
 
-            order_key = bytes.fromhex(order_key_hex)
+            order_key = bytes.fromhex(order_key_hex.removeprefix("0x"))
 
             # Get creation block for accurate log scanning (important after bot restart)
             creation_block = order.get("info", {}).get("block_number")
@@ -6774,6 +7268,36 @@ class GMX(ExchangeCompatible):
 
             except Exception as e:
                 logger.warning("Could not fetch transaction %s from blockchain: %s", id, e)
+                # Blockchain lookup failed (e.g., tx pruned from Arbitrum node after restart).
+                # Try to recover the order by querying the GMX DataStore for pending orders.
+                # This prevents freqtrade from thinking the SL is gone and trying to re-create
+                # it (which would cause a UNIQUE constraint violation in the DB).
+                if symbol:
+                    try:
+                        pending = self.fetch_open_orders(symbol=symbol, params={"pending_orders_only": True})
+                        matching = [o for o in pending if o.get("type") in ("stopLoss", "take_profit", "limit")]
+                        if matching:
+                            recovered = dict(matching[0])
+                            # Override the id to match what freqtrade has stored in its DB
+                            # (the original tx_hash), so freqtrade does not try to re-create
+                            # or re-insert the order.
+                            recovered["id"] = id
+                            # Cache under both the 0x and non-0x forms for future lookups.
+                            normalized_id = id if id.startswith("0x") else f"0x{id}"
+                            self._orders[id] = recovered
+                            self._orders[normalized_id] = recovered
+                            logger.info(
+                                "ORDER_TRACE: fetch_order(%s) - RECOVERED via pending orders (tx not on node), order still active on GMX, order_key=%s",
+                                id[:16],
+                                matching[0].get("info", {}).get("order_key", "?")[:18],
+                            )
+                            return recovered
+                    except Exception as recover_err:
+                        logger.warning(
+                            "fetch_order(%s): pending order recovery also failed: %s",
+                            id[:16],
+                            recover_err,
+                        )
                 # Fall through to raise OrderNotFound
 
         # Order not found anywhere
@@ -6818,16 +7342,27 @@ class GMX(ExchangeCompatible):
         since: int | None = None,
         limit: int | None = None,
         params: dict | None = None,
-    ):
-        """Fetch all orders.
+    ) -> list[dict]:
+        """Fetch pending DataStore limit orders (stop loss, take profit, limit increase).
 
-        Not supported by GMX - use fetch_positions() and fetch_my_trades() instead.
+        Delegates to :meth:`fetch_open_orders` with ``pending_orders_only=True``,
+        returning only orders that are currently waiting in the GMX DataStore
+        for their trigger price conditions to be met.
 
-        :raises NotSupported: GMX doesn't track pending orders
+        :param symbol:
+            Filter by market symbol (optional).
+        :param since:
+            Not used.
+        :param limit:
+            Maximum number of results.
+        :param params:
+            Forwarded to :meth:`fetch_open_orders`. ``wallet_address`` override supported.
+        :return:
+            List of CCXT-formatted pending limit orders.
         """
-        raise NotSupported(
-            self.id + " fetch_orders() is not supported - GMX orders execute immediately. Use fetch_positions() for open positions.",
-        )
+        merged = dict(params or {})
+        merged["pending_orders_only"] = True
+        return self.fetch_open_orders(symbol=symbol, since=since, limit=limit, params=merged)
 
     async def close(self) -> None:
         """Close exchange connection and clean up resources.

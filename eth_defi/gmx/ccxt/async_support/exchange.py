@@ -5,9 +5,9 @@ AsyncWeb3 for blockchain operations, and async GraphQL for Subsquid queries.
 """
 
 import asyncio
+import logging
 import os
 from datetime import datetime
-import logging
 from pathlib import Path
 from statistics import median
 from typing import Any
@@ -29,22 +29,71 @@ from eth_defi.gmx.ccxt.async_support.async_http import async_make_gmx_api_reques
 from eth_defi.gmx.ccxt.properties import describe_gmx
 from eth_defi.gmx.ccxt.validation import _validate_ohlcv_data_sufficiency
 from eth_defi.gmx.config import GMXConfig
-from eth_defi.gmx.constants import GMX_MIN_COST_USD, PRECISION
+from eth_defi.gmx.constants import (
+    GMX_MIN_COST_USD,
+    PRECISION,
+    _MIN_LOG_CHUNK_BLOCKS,
+)
+from eth_defi.gmx.contracts import get_contract_addresses
 from eth_defi.gmx.core import Markets
 from eth_defi.gmx.core.open_positions import GetOpenPositions
 from eth_defi.gmx.core.oracle import OraclePrices
-from eth_defi.gmx.order.sltp_order import SLTPEntry, SLTPOrder, SLTPParams
-from eth_defi.gmx.contracts import get_contract_addresses
 from eth_defi.gmx.events import decode_gmx_event, extract_order_key_from_receipt
+from eth_defi.gmx.ccxt.cancel_helpers import build_cancel_order_response, resolve_order_id
+from eth_defi.gmx.order.cancel_order import CancelOrder
+from eth_defi.gmx.order.sltp_order import SLTPEntry, SLTPOrder, SLTPParams
+from eth_defi.gmx.order_tracking import check_order_status, is_order_pending
 from eth_defi.gmx.utils import convert_raw_price_to_usd
-from eth_defi.gmx.order_tracking import check_order_status
 from eth_defi.gmx.verification import verify_gmx_order_execution
 from eth_defi.hotwallet import HotWallet
+from eth_defi.provider.fallback import ExtraValueError
 from eth_defi.provider.log_block_range import get_logs_max_block_range
 from eth_defi.provider.multi_provider import create_multi_provider_web3
 from eth_defi.token import fetch_erc20_details
 
 logger = logging.getLogger(__name__)
+
+
+async def _get_logs_adaptive_async(
+    async_web3: AsyncWeb3,
+    address: str,
+    from_block: int,
+    to_block: int,
+) -> list:
+    """Async version of adaptive eth_getLogs that bisects the range on log-count overflow.
+
+    See ``eth_defi.gmx.ccxt.exchange._get_logs_adaptive`` for full documentation.
+
+    :param async_web3: AsyncWeb3 instance.
+    :param address: Contract address to filter logs by.
+    :param from_block: Start block (inclusive).
+    :param to_block: End block (inclusive).
+    :returns: Combined list of log entries across all sub-ranges.
+    :raises ExtraValueError: Re-raised when the range is already at the minimum and still overflows.
+    """
+    try:
+        return await async_web3.eth.get_logs(
+            {
+                "address": address,
+                "fromBlock": from_block,
+                "toBlock": to_block,
+            }
+        )
+    except ExtraValueError as exc:
+        payload = exc.args[0] if exc.args else {}
+        msg = payload.get("message", "") if isinstance(payload, dict) else str(payload)
+        if "exceeds limit" in msg and to_block > from_block and (to_block - from_block) >= _MIN_LOG_CHUNK_BLOCKS:
+            mid = (from_block + to_block) // 2
+            logger.debug(
+                "Log count exceeded for blocks %d-%d, bisecting at block %d",
+                from_block,
+                to_block,
+                mid,
+            )
+            left = await _get_logs_adaptive_async(async_web3, address, from_block, mid)
+            right = await _get_logs_adaptive_async(async_web3, address, mid + 1, to_block)
+            return left + right
+        raise
 
 
 async def _async_scan_logs_chunked_for_trade_action(
@@ -103,13 +152,7 @@ async def _async_scan_logs_chunked_for_trade_action(
         )
 
         try:
-            logs = await async_web3.eth.get_logs(
-                {
-                    "address": event_emitter,
-                    "fromBlock": chunk_start,
-                    "toBlock": chunk_end,
-                }
-            )
+            logs = await _get_logs_adaptive_async(async_web3, event_emitter, chunk_start, chunk_end)
 
             for log in logs:
                 try:
@@ -219,6 +262,7 @@ class GMX(Exchange):
         self._private_key = config.get("privateKey", "") if config else ""
         self._chain_id_override = config.get("chainId") if config else None
         self._subsquid_endpoint = config.get("subsquidEndpoint") if config else None
+        self.execution_buffer = config.get("executionBuffer", 2.2) if config else 2.2
 
         # Async components (lazy initialization)
         self.session: aiohttp.ClientSession | None = None
@@ -1241,9 +1285,191 @@ class GMX(Exchange):
         self._orders = {}
         logger.info("Cleared order cache")
 
-    async def cancel_order(self, id: str, symbol: str | None = None, params: dict | None = None):
-        """Not supported - GMX orders execute immediately."""
-        raise NotSupported(f"{self.id} cancel_order() not supported - GMX orders execute immediately")
+    async def cancel_order(self, id: str, symbol: str | None = None, params: dict | None = None) -> dict:
+        """Cancel a pending limit order (stop loss, take profit, or limit increase).
+
+        Only pending limit orders stored in the GMX DataStore can be cancelled.
+        Market orders execute immediately via keepers and are not cancellable.
+
+        :param id:
+            Order key as a hex string (``"0x..."`` or bare hex).
+        :param symbol:
+            Symbol (not used, included for CCXT compatibility).
+        :param params:
+            Additional parameters (not used).
+        :return:
+            CCXT-compatible order dict with ``status="cancelled"``.
+        :raises ValueError:
+            If wallet not configured.
+        :raises OrderNotFound:
+            If the order key does not exist in the DataStore.
+        :raises ExchangeError:
+            If the cancel transaction reverts on-chain.
+        """
+        if not self.wallet:
+            raise ValueError(
+                "Wallet required for order cancellation. Provide 'privateKey' or 'wallet' in constructor parameters.",
+            )
+
+        if params is None:
+            params = {}
+
+        # Read execution_buffer from params or fall back to instance variable, then ccxt_config value.
+        execution_buffer = params.get(
+            "execution_buffer",
+            getattr(self, "execution_buffer", self.options.get("executionBuffer", 2.2)),
+        )
+
+        id, order_key = resolve_order_id(self._orders, id, "cancel_order")
+
+        chain = self.config.get_chain()
+
+        # Verify the order exists in the DataStore (sync call)
+        if not is_order_pending(self.sync_web3, order_key, chain):
+            raise OrderNotFound(
+                f"{self.id} order {id} not found in DataStore (may have already been executed or cancelled).",
+            )
+
+        logger.info("Cancelling limit order %s with execution_buffer=%.1fx", id[:18], execution_buffer)
+
+        # Build unsigned cancel transaction (uses sync_web3 internally)
+        canceller = CancelOrder(self.config)
+        result = canceller.cancel_order(order_key, execution_buffer=execution_buffer)
+
+        # Sign (wallet manages nonce internally)
+        transaction = dict(result.transaction)
+        transaction.pop("nonce", None)
+
+        signed_tx = self.wallet.sign_transaction_with_new_nonce(transaction)
+
+        # Submit and wait for on-chain confirmation (sync calls run in event loop).
+        # get_running_loop() is the correct call inside an async function (get_event_loop()
+        # is deprecated since Python 3.10).
+        loop = asyncio.get_running_loop()
+        tx_hash_bytes = await loop.run_in_executor(None, self.sync_web3.eth.send_raw_transaction, signed_tx.rawTransaction)
+        tx_hash = self.sync_web3.to_hex(tx_hash_bytes)
+        receipt = await loop.run_in_executor(None, self.sync_web3.eth.wait_for_transaction_receipt, tx_hash_bytes)
+
+        if receipt.get("status") == 0:
+            raise ExchangeError(
+                f"{self.id} cancel_order() transaction reverted on-chain: {tx_hash}",
+            )
+
+        logger.info("Order %s cancelled successfully: tx_hash=%s", id[:18], tx_hash)
+
+        return build_cancel_order_response(
+            order_id=id,
+            symbol=symbol,
+            tx_hash=tx_hash,
+            block_number=receipt.get("blockNumber"),
+            timestamp_ms=self.milliseconds(),
+            iso8601_fn=self.iso8601,
+        )
+
+    async def cancel_orders(
+        self,
+        ids: list[str],
+        symbol: str | None = None,
+        params: dict | None = None,
+    ) -> list[dict]:
+        """Cancel multiple pending limit orders in a single batch transaction.
+
+        Batches all ``cancelOrder`` calls into one ``multicall`` via
+        :class:`~eth_defi.gmx.order.cancel_order.CancelOrder`, which is more
+        gas-efficient than calling :meth:`cancel_order` in a loop.
+
+        :param ids:
+            List of order keys as hex strings (``"0x..."`` or bare hex).
+            Each may be a tx_hash (resolved to order_key via the orders
+            cache) or a raw DataStore order_key.
+        :param symbol:
+            Symbol (not used, included for CCXT compatibility).
+        :param params:
+            Additional parameters.  Pass ``execution_buffer`` to override
+            the default from ``ccxt_config["executionBuffer"]``.
+        :return:
+            List of CCXT-compatible order dicts with ``status="cancelled"``,
+            one per cancelled order.  All entries share the same ``tx_hash``.
+        :raises ValueError:
+            If *ids* is empty or wallet not configured.
+        :raises OrderNotFound:
+            If any order key does not exist in the DataStore.
+        :raises ExchangeError:
+            If the batch cancel transaction reverts on-chain.
+        """
+        if not ids:
+            raise ValueError("ids must not be empty")
+
+        if not self.wallet:
+            raise ValueError(
+                "Wallet required for order cancellation. Provide 'privateKey' or 'wallet' in constructor parameters.",
+            )
+
+        if params is None:
+            params = {}
+
+        execution_buffer = params.get(
+            "execution_buffer",
+            getattr(self, "execution_buffer", self.options.get("executionBuffer", 2.2)),
+        )
+
+        order_keys: list[bytes] = []
+        resolved_ids: list[str] = []
+        # Resolve once — chain never changes between iterations.
+        chain = self.config.get_chain()
+
+        for raw_id in ids:
+            raw_id, order_key = resolve_order_id(self._orders, raw_id, "cancel_orders")
+            if not is_order_pending(self.sync_web3, order_key, chain):
+                raise OrderNotFound(
+                    f"{self.id} order {raw_id} not found in DataStore (may have already been executed or cancelled).",
+                )
+            order_keys.append(order_key)
+            resolved_ids.append(raw_id)
+
+        logger.info(
+            "Cancelling %d orders in batch with execution_buffer=%.1fx",
+            len(order_keys),
+            execution_buffer,
+        )
+
+        canceller = CancelOrder(self.config)
+        result = canceller.cancel_orders(order_keys, execution_buffer=execution_buffer)
+
+        transaction = dict(result.transaction)
+        transaction.pop("nonce", None)
+
+        signed_tx = self.wallet.sign_transaction_with_new_nonce(transaction)
+
+        loop = asyncio.get_running_loop()
+        tx_hash_bytes = await loop.run_in_executor(None, self.sync_web3.eth.send_raw_transaction, signed_tx.rawTransaction)
+        tx_hash = self.sync_web3.to_hex(tx_hash_bytes)
+        receipt = await loop.run_in_executor(None, self.sync_web3.eth.wait_for_transaction_receipt, tx_hash_bytes)
+
+        if receipt.get("status") == 0:
+            raise ExchangeError(
+                f"{self.id} cancel_orders() transaction reverted on-chain: {tx_hash}",
+            )
+
+        logger.info(
+            "%d orders cancelled in batch: tx_hash=%s",
+            len(order_keys),
+            tx_hash,
+        )
+
+        timestamp = self.milliseconds()
+        block_number = receipt.get("blockNumber")
+        return [
+            build_cancel_order_response(
+                order_id=resolved_id,
+                symbol=symbol,
+                tx_hash=tx_hash,
+                block_number=block_number,
+                timestamp_ms=timestamp,
+                iso8601_fn=self.iso8601,
+            )
+            for resolved_id in resolved_ids
+        ]
 
     def _get_token_decimals(self, market: dict | None) -> int | None:
         """Get token decimals from market metadata.
@@ -2639,15 +2865,14 @@ class GMX(Exchange):
         if "size_usd" in params:
             # Direct USD amount (GMX-native approach)
             size_delta_usd = params["size_usd"]
+        # Standard CCXT: amount is in base currency, convert to USD
+        elif price:
+            size_delta_usd = amount * price
         else:
-            # Standard CCXT: amount is in base currency, convert to USD
-            if price:
-                size_delta_usd = amount * price
-            else:
-                # For market orders, fetch current price
-                ticker = await self.fetch_ticker(symbol)
-                current_price = ticker["last"]
-                size_delta_usd = amount * current_price
+            # For market orders, fetch current price
+            ticker = await self.fetch_ticker(symbol)
+            current_price = ticker["last"]
+            size_delta_usd = amount * current_price
 
         return {
             "symbol": symbol,
@@ -2737,7 +2962,7 @@ class GMX(Exchange):
 
         # Apply EIP-1559 gas pricing with safety buffer to avoid
         # "max fee per gas less than block base fee" race condition on L2s
-        from eth_defi.gas import estimate_gas_price, apply_gas
+        from eth_defi.gas import apply_gas, estimate_gas_price
 
         gas_fees = estimate_gas_price(self.web3)
         apply_gas(approve_tx, gas_fees)

@@ -290,6 +290,22 @@ GAS_LIMITS = {
     "multicall_base": 200000,
 }
 
+#: Gas limit per cancel order call.
+#:
+#: GMX's ``OrderUtils.cancelOrder`` checks ``gasleft() >= minHandleExecutionErrorGas``
+#: at the start of execution.  On Arbitrum mainnet, ``minHandleExecutionErrorGas``
+#: is stored in the DataStore at **1,200,000** gas.  With multicall overhead and the
+#: EVM's 63/64 gas-forwarding rule, the transaction must provide enough gas that
+#: at least 1,200,000 gas units remain when the check runs.  Empirically, a
+#: 700,000 gas limit leaves only ~438,308 gas at the check point, triggering
+#: ``InsufficientGasForCancellation(438308, 1200000)``.
+#:
+#: Applied **per order** in both single and batch cancellations; for a batch
+#: of N orders the total gas is ``CANCEL_ORDER_GAS_LIMIT * N``.
+#:
+#: Reference: https://github.com/gmx-io/gmx-synthetics/blob/main/contracts/order/OrderUtils.sol
+CANCEL_ORDER_GAS_LIMIT: int = 2_000_000
+
 # Gas monitoring default thresholds (in USD)
 #: Default warning threshold for low gas balance in USD
 #: When balance drops below this value, a warning is logged
@@ -332,9 +348,16 @@ TOKEN_ADDRESS_MAPPINGS = {
 }
 
 # Trading limits
-#: Minimum cost (USD) for GMX orders - GMX protocol minimum is $2
-#: It's not mentioned in the docs but observed from the web UI. https://app.gmx.io/#/trade
+#: Minimum order/position size (USD) on GMX — the protocol rejects orders below this.
+#: Observed from the GMX web UI: https://app.gmx.io/#/trade
 GMX_MIN_COST_USD = 2
+
+#: Minimum liquidation collateral threshold (USD) used by the GMX protocol.
+#: GMX liquidates a position when remaining collateral falls below
+#: ``max(position_size_usd * 0.005, GMX_MIN_LIQUIDATION_COLLATERAL_USD)``.
+#: This is a separate protocol constant from the minimum position size (``GMX_MIN_COST_USD``).
+#: For positions smaller than ~$1000, this $5 floor dominates the 0.5% term.
+GMX_MIN_LIQUIDATION_COLLATERAL_USD = 5.0
 
 #: Minimum display stake (USD) for leverage tier calculations
 #: Used to ensure minimum position sizes in leverage tier max notional calculations
@@ -371,3 +394,66 @@ SUBSQUID_ORDER_TRACKING_BACKOFF_MULTIPLIER = 2.0
 
 # GMX API retry configuration has moved to eth_defi.gmx.retry.GMXRetryConfig.
 # The old module-level constants are no longer used.
+
+# ---------------------------------------------------------------------------
+# Gas-critical pause behaviour (freqtrade exchange layer)
+# ---------------------------------------------------------------------------
+
+#: Maximum number of consecutive gas-critical order rejections within the
+#: sliding window before exit orders are paused for the pair.
+_GAS_CRITICAL_MAX_RETRIES: int = 3
+
+#: Sliding-window duration (seconds) for counting consecutive gas-critical
+#: failures.  The counter resets once this window has elapsed without a new
+#: failure.
+_GAS_CRITICAL_WINDOW_SECS: int = 300  # 5-minute window
+
+#: How long (seconds) to pause exit orders for a pair after
+#: :data:`_GAS_CRITICAL_MAX_RETRIES` failures inside the window.
+_GAS_CRITICAL_PAUSE_SECS: int = 900  # 15-minute pause
+
+# ---------------------------------------------------------------------------
+# Execution buffer thresholds
+# ---------------------------------------------------------------------------
+
+#: Default execution-fee buffer multiplier for standard orders
+#: (increase, decrease, swap).  The estimated fee is multiplied by this value
+#: so that keepers are covered even during gas-price spikes.  Any excess is
+#: refunded by GMX.
+DEFAULT_EXECUTION_BUFFER: float = 2.2
+
+#: Default execution-fee buffer for bundled SL/TP multicall transactions,
+#: which include multiple sub-orders and therefore need a higher margin.
+DEFAULT_SLTP_EXECUTION_BUFFER: float = 2.5
+
+#: Additional fee-buffer multiplier applied to the individual SL/TP
+#: sub-orders *within* a bundled multicall on top of
+#: :data:`DEFAULT_SLTP_EXECUTION_BUFFER`.
+#: Set to ``1.0`` (no compounding) to match GMX interface behaviour —
+#: the UI applies a single ``executionFeeBufferBps`` (30 %) to all order
+#: types uniformly.
+DEFAULT_SLTP_EXECUTION_FEE_BUFFER: float = 1.0
+
+#: Execution buffer below this value triggers a critical error log.
+#: GMX keepers will very likely reject orders with a buffer this low.
+EXECUTION_BUFFER_CRITICAL_THRESHOLD: float = 1.2
+
+#: Execution buffer below this value triggers a warning log.
+#: Orders may fail during gas-price spikes.
+EXECUTION_BUFFER_WARNING_THRESHOLD: float = 1.5
+
+#: Lower bound of the recommended execution-buffer range for standard orders.
+EXECUTION_BUFFER_RECOMMENDED_MIN: float = 1.8
+
+#: Upper bound of the recommended execution-buffer range for standard orders.
+#: Equals :data:`DEFAULT_EXECUTION_BUFFER`.
+EXECUTION_BUFFER_RECOMMENDED_MAX: float = 2.2
+
+# ---------------------------------------------------------------------------
+# RPC / blockchain query limits
+# ---------------------------------------------------------------------------
+
+#: Minimum block range when adaptively splitting an overflowing
+#: ``eth_getLogs`` query.  Some RPC providers (e.g. Alchemy) cap the number
+#: of log entries per query; below this size we stop splitting further.
+_MIN_LOG_CHUNK_BLOCKS: int = 100

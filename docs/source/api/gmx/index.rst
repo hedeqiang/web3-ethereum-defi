@@ -18,6 +18,7 @@ Tutorials
 - :ref:`lagoon-gmx` - Trade GMX perpetuals from a Lagoon vault
 - :ref:`gmx-ccxt-freqtrade` - Algorithmic trading on GMX using FreqTrade and CCXT
 
+
 What Is GMX?
 =============
 
@@ -52,7 +53,6 @@ More info
    eth_defi.gmx.contracts
    eth_defi.gmx.data
    eth_defi.gmx.events
-   eth_defi.gmx.execution_buffer
    eth_defi.gmx.gas_utils
    eth_defi.gmx.keys
    eth_defi.gmx.order
