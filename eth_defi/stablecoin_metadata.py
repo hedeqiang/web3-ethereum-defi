@@ -650,3 +650,57 @@ def process_and_upload_stablecoin_metadata(
         )
 
     return metadata
+
+
+def build_stablecoin_index(public_url: str = "") -> list[StablecoinMetadata]:
+    """Build a single index of all stablecoin metadata.
+
+    Loads every YAML file and returns a flat list of :py:class:`StablecoinMetadata`
+    entries suitable for JSON serialisation as ``stablecoin-metadata/index.json``.
+
+    :param public_url:
+        Public base URL for constructing logo URLs
+
+    :return:
+        List of all stablecoin metadata entries
+    """
+    index: list[StablecoinMetadata] = []
+    for yaml_path in sorted(STABLECOINS_DATA_DIR.glob("*.yaml")):
+        entries = build_stablecoin_metadata_json(yaml_path, public_url=public_url)
+        index.extend(entries)
+    return index
+
+
+def upload_stablecoin_index(
+    bucket_name: str,
+    endpoint_url: str,
+    access_key_id: str,
+    secret_access_key: str,
+    public_url: str = "",
+    key_prefix: str = "",
+) -> list[StablecoinMetadata]:
+    """Build and upload the aggregate stablecoin index to R2.
+
+    Uploads to ``stablecoin-metadata/{key_prefix}index.json``.
+
+    :return:
+        The full index list
+    """
+    from eth_defi.research.sparkline import upload_to_r2_compressed
+
+    index = build_stablecoin_index(public_url=public_url)
+
+    logger.info("Uploading stablecoin index with %d entries", len(index))
+
+    json_bytes = json.dumps(index, indent=2).encode()
+    upload_to_r2_compressed(
+        payload=json_bytes,
+        bucket_name=bucket_name,
+        object_name=f"stablecoin-metadata/{key_prefix}index.json",
+        endpoint_url=endpoint_url,
+        access_key_id=access_key_id,
+        secret_access_key=secret_access_key,
+        content_type="application/json",
+    )
+
+    return index
