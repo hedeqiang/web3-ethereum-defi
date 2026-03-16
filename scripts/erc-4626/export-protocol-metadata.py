@@ -158,6 +158,7 @@ def main():
             endpoint_url=endpoint_url,
             access_key_id=access_key_id,
             secret_access_key=secret_access_key,
+            public_url=public_url,
         )
 
     stablecoin_tasks = (delayed(_process_stablecoin)(f) for f in stablecoin_files)

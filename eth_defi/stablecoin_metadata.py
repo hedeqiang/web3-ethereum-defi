@@ -70,6 +70,9 @@ logger = logging.getLogger(__name__)
 #: Base directory for stablecoin data YAML files
 STABLECOINS_DATA_DIR = Path(__file__).parent / "data" / "stablecoins"
 
+#: Directory containing formatted 256x256 PNG logos
+STABLECOIN_FORMATTED_LOGOS_DIR = STABLECOINS_DATA_DIR / "formatted_logos"
+
 #: All link fields that should be present in the output
 STABLECOIN_LINK_FIELDS = ["homepage", "coingecko", "defillama", "twitter"]
 
@@ -308,11 +311,25 @@ class StablecoinInfo(TypedDict):
     twitter: str
 
 
+class StablecoinLogos(TypedDict):
+    """Logo URLs for a stablecoin.
+
+    Logo URLs point to 256x256 PNG files in R2 storage.
+    ``None`` if the logo variant is not available.
+    """
+
+    #: Logo for light backgrounds (dark-coloured logo)
+    light: str | None
+
+
 class StablecoinMetadata(TypedDict):
     """Complete stablecoin metadata as exported to JSON."""
 
     #: Token symbol (e.g. ``USDC``, ``USG``)
     symbol: str
+
+    #: Lowercase slug matching the YAML filename (e.g. ``usdc``, ``usg``)
+    slug: str
 
     #: Human-readable name
     name: str
@@ -325,6 +342,9 @@ class StablecoinMetadata(TypedDict):
 
     #: Links
     links: StablecoinLinks
+
+    #: Logo URLs
+    logos: StablecoinLogos
 
 
 def read_stablecoin_metadata(yaml_path: Path) -> dict:
@@ -476,17 +496,36 @@ def normalise_token_symbol(token_symbol: str | None) -> str | None:
     return token_symbol
 
 
-def build_stablecoin_metadata_json(yaml_path: Path) -> list[StablecoinMetadata]:
+def get_stablecoin_available_logos(slug: str) -> dict[str, bool]:
+    """Check which logo variants are available for a stablecoin.
+
+    :param slug:
+        Stablecoin slug (e.g. ``usdc``, ``usg``)
+
+    :return:
+        Dictionary with ``light`` key indicating availability
+    """
+    logo_dir = STABLECOIN_FORMATTED_LOGOS_DIR / slug
+    return {
+        "light": (logo_dir / "light.png").exists(),
+    }
+
+
+def build_stablecoin_metadata_json(yaml_path: Path, public_url: str = "") -> list[StablecoinMetadata]:
     """Build StablecoinMetadata list from a YAML file.
 
     :param yaml_path:
         Path to the stablecoin metadata YAML file
+
+    :param public_url:
+        Public base URL for constructing logo URLs (e.g. ``https://pub-xyz.r2.dev``)
 
     :return:
         List of StablecoinMetadata dicts ready for JSON export
     """
     data = read_stablecoin_metadata(yaml_path)
     symbol = data["symbol"]
+    slug = data.get("slug") or yaml_path.stem
     category = data.get("category", "stablecoin")
 
     def normalise(value):
@@ -497,6 +536,13 @@ def build_stablecoin_metadata_json(yaml_path: Path) -> list[StablecoinMetadata]:
             return stripped if stripped else None
         return value
 
+    # Build logo URLs based on availability
+    available = get_stablecoin_available_logos(slug)
+    public_url = public_url.rstrip("/") if public_url else ""
+    logos: StablecoinLogos = {
+        "light": f"{public_url}/stablecoin-metadata/{slug}/light.png" if available["light"] and public_url else None,
+    }
+
     if "entries" in data:
         result = []
         for entry in data["entries"]:
@@ -505,10 +551,12 @@ def build_stablecoin_metadata_json(yaml_path: Path) -> list[StablecoinMetadata]:
             result.append(
                 StablecoinMetadata(
                     symbol=symbol,
+                    slug=slug,
                     name=entry.get("name", ""),
                     description=normalise(entry.get("description")),
                     category=category,
                     links=links,
+                    logos=logos,
                 )
             )
         return result
@@ -518,10 +566,12 @@ def build_stablecoin_metadata_json(yaml_path: Path) -> list[StablecoinMetadata]:
         return [
             StablecoinMetadata(
                 symbol=symbol,
+                slug=slug,
                 name=data.get("name", ""),
                 description=normalise(data.get("description")),
                 category=category,
                 links=links,
+                logos=logos,
             )
         ]
 
@@ -532,9 +582,15 @@ def process_and_upload_stablecoin_metadata(
     endpoint_url: str,
     access_key_id: str,
     secret_access_key: str,
+    public_url: str = "",
     key_prefix: str = "",
 ) -> list[StablecoinMetadata]:
-    """Process and upload a single stablecoin's metadata to R2.
+    """Process and upload a single stablecoin's metadata and logo to R2.
+
+    Uploads:
+
+    - ``stablecoin-metadata/{slug}/metadata.json`` — JSON metadata
+    - ``stablecoin-metadata/{slug}/light.png`` — 256x256 logo (if available)
 
     :param yaml_path:
         Path to the stablecoin YAML file
@@ -551,6 +607,9 @@ def process_and_upload_stablecoin_metadata(
     :param secret_access_key:
         R2 secret access key
 
+    :param public_url:
+        Public base URL for constructing logo URLs in metadata
+
     :param key_prefix:
         Optional prefix for R2 keys (e.g., "test-" for testing)
 
@@ -559,11 +618,12 @@ def process_and_upload_stablecoin_metadata(
     """
     from eth_defi.research.sparkline import upload_to_r2_compressed
 
-    metadata = build_stablecoin_metadata_json(yaml_path)
+    metadata = build_stablecoin_metadata_json(yaml_path, public_url=public_url)
     slug = yaml_path.stem
 
     logger.info("Uploading stablecoin metadata for: %s", slug)
 
+    # Upload metadata JSON
     json_bytes = json.dumps(metadata, indent=2).encode()
     upload_to_r2_compressed(
         payload=json_bytes,
@@ -574,5 +634,19 @@ def process_and_upload_stablecoin_metadata(
         secret_access_key=secret_access_key,
         content_type="application/json",
     )
+
+    # Upload logo if available
+    logo_path = STABLECOIN_FORMATTED_LOGOS_DIR / slug / "light.png"
+    if logo_path.exists():
+        logger.info("Uploading light logo for stablecoin: %s", slug)
+        upload_to_r2_compressed(
+            payload=logo_path.read_bytes(),
+            bucket_name=bucket_name,
+            object_name=f"stablecoin-metadata/{key_prefix}{slug}/light.png",
+            endpoint_url=endpoint_url,
+            access_key_id=access_key_id,
+            secret_access_key=secret_access_key,
+            content_type="image/png",
+        )
 
     return metadata
