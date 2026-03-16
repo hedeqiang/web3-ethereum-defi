@@ -210,14 +210,28 @@ class LagoonConfig:
     #: Vault parameters (name, symbol, underlying token, fees)
     parameters: LagoonDeploymentParameters
 
-    #: Address that manages vault assets and executes trades
-    asset_manager: HexAddress
-
     #: Addresses of Safe multisig owners
     safe_owners: list[HexAddress | str]
 
     #: Number of owner signatures required for Safe transactions
     safe_threshold: int
+
+    #: Primary asset manager kept for backwards compatibility.
+    #:
+    #: Deprecated in favour of ``asset_managers``. When both are provided,
+    #: ``asset_managers`` wins.
+    asset_manager: HexAddress | None = None
+
+    #: Addresses that manage vault assets and execute trades.
+    #:
+    #: All entries are whitelisted as guard senders. The first entry becomes
+    #: the primary asset manager and is used as the Lagoon valuation manager
+    #: unless ``parameters.valuationManager`` was explicitly set.
+    #:
+    #: The main use case today is splitting permissions between FreqTrade and
+    #: GMX trading keys while keeping the same Guard rights. Future automated
+    #: trading or operational workflows may reuse the same mechanism.
+    asset_managers: list[HexAddress | str] | None = None
 
     #: Uniswap V2 deployment for router whitelisting
     uniswap_v2: UniswapV2Deployment | None = None
@@ -307,6 +321,11 @@ class LagoonConfig:
     #: source chain needs a vault contract.
     satellite_chain: bool = False
 
+    def __post_init__(self) -> None:
+        """Populate multi-key config from the legacy single-key field."""
+        if self.asset_managers is None and self.asset_manager is not None:
+            self.asset_managers = [self.asset_manager]
+
 
 @dataclass(slots=True, frozen=True)
 class WhitelistEntry:
@@ -335,7 +354,8 @@ class LagoonAutomatedDeployment:
     vault: LagoonVault | LagoonSatelliteVault
 
     trading_strategy_module: Contract
-    asset_manager: HexAddress
+    asset_managers: tuple[HexAddress, ...]
+    valuation_manager: HexAddress
     multisig_owners: list[HexAddress]
     deployer: HexAddress
     block_number: BlockNumber
@@ -371,6 +391,14 @@ class LagoonAutomatedDeployment:
         return self.vault.safe
 
     @property
+    def asset_manager(self) -> HexAddress:
+        """Get the primary asset manager.
+
+        Kept for backwards compatibility with single-key deployments.
+        """
+        return self.asset_managers[0]
+
+    @property
     def is_satellite(self) -> bool:
         """Whether this deployment is a satellite chain (Safe + guard only, no vault)."""
         return isinstance(self.vault, LagoonSatelliteVault)
@@ -389,6 +417,8 @@ class LagoonAutomatedDeployment:
             "Beacon proxy factory": self.beacon_proxy_factory,
             "Trading strategy module": self.trading_strategy_module.address,
             "Asset manager": self.asset_manager,
+            "Asset managers": ", ".join(self.asset_managers),
+            "Valuation manager": self.valuation_manager,
             "Multisig owners": ", ".join(self.multisig_owners),
             "Block number": f"{self.block_number:,}",
             "Performance fee": f"{self.parameters.performanceRate / 100:,} %",
@@ -450,6 +480,46 @@ class LagoonMultichainDeployment:
 
     #: The salt nonce used for deterministic Safe deployment
     safe_salt_nonce: int
+
+
+def _normalise_asset_managers(
+    asset_manager: HexAddress | str | None,
+    asset_managers: list[HexAddress | str] | tuple[HexAddress | str, ...] | None,
+) -> tuple[HexAddress, ...]:
+    """Normalise single- and multi-key asset manager inputs.
+
+    ``asset_managers`` is the preferred input. ``asset_manager`` is kept as a
+    backwards-compatible fallback for older call sites.
+
+    The primary use case today is allowing separate FreqTrade and GMX trading
+    keys to share the same Guard permissions while keeping a single Lagoon
+    valuation manager. Other multi-key workflows may be added later.
+
+    An explicitly passed empty ``asset_managers`` list is treated the same as
+    ``None`` and will fail with the validation assert below.
+    """
+    raw_addresses: list[HexAddress | str]
+
+    if asset_managers:
+        raw_addresses = list(asset_managers)
+    elif asset_manager:
+        raw_addresses = [asset_manager]
+    else:
+        raw_addresses = []
+
+    assert raw_addresses, "At least one asset manager address must be provided"
+
+    seen: set[HexAddress] = set()
+    normalised: list[HexAddress] = []
+    for address in raw_addresses:
+        checksum = Web3.to_checksum_address(address)
+        if checksum in seen:
+            continue
+        seen.add(checksum)
+        normalised.append(checksum)
+
+    assert normalised, "At least one asset manager address must remain after normalisation"
+    return tuple(normalised)
 
 
 def deploy_lagoon_protocol_registry(
@@ -1064,7 +1134,7 @@ def setup_guard(
     safe: Safe,
     deployer: HotWallet,
     owner: HexAddress,
-    asset_manager: HexAddress,
+    asset_managers: list[HexAddress] | tuple[HexAddress, ...],
     vault: Contract | None,
     module: Contract,
     broadcast_func: Callable[[ContractFunction], HexBytes],
@@ -1112,11 +1182,16 @@ def setup_guard(
 
     logger.info("Setting up TradingStrategyModuleV0 guard: %s", module.address)
 
-    # Enable asset_manager as the whitelisted trade-executor
-    logger.info("Whitelisting trade-executor as sender")
-    tx_hash = _broadcast(module.functions.allowSender(asset_manager, "Whitelist trade-executor"))
-    assert_transaction_success_with_explanation(web3, tx_hash)
-    entries.append(WhitelistEntry("Sender", "trade-executor", asset_manager))
+    # Enable all configured asset manager keys as whitelisted trade executors.
+    #
+    # Today this is mainly used to support separate FreqTrade and GMX trading
+    # keys with identical Guard permissions. Future deployment setups may use
+    # the same path for other multi-key trading workflows.
+    for asset_manager in asset_managers:
+        logger.info("Whitelisting trade-executor as sender: %s", asset_manager)
+        tx_hash = _broadcast(module.functions.allowSender(asset_manager, "Whitelist trade-executor"))
+        assert_transaction_success_with_explanation(web3, tx_hash)
+        entries.append(WhitelistEntry("Sender", "trade-executor", asset_manager))
 
     # Enable safe as the receiver of tokens
     logger.info("Whitelist Safe as trade receiver")
@@ -1417,6 +1492,7 @@ def deploy_automated_lagoon_vault(
     deployer: LocalAccount | HotWallet,
     config: LagoonConfig | None = None,
     asset_manager: HexAddress | None = None,
+    asset_managers: list[HexAddress | str] | None = None,
     parameters: LagoonDeploymentParameters | None = None,
     safe_owners: list[HexAddress | str] | None = None,
     safe_threshold: int | None = None,
@@ -1455,7 +1531,10 @@ def deploy_automated_lagoon_vault(
     - TradingStrategyModuleV0 module enabling guarded automated trade executor for the Safe
 
     For roles
-    - Asset manager (Trading Straegy) and Valuation Manager (Lagoon) are the same role
+    - The primary asset manager and Valuation Manager (Lagoon) are the same role
+    - Multiple asset-manager keys may share the same Guard rights; today this
+      mainly supports separate FreqTrade and GMX trading keys, but other
+      workflows may use the same pattern in the future
     - Any Safe must be deployed as 1-of-1 deployer address multisig and multisig holders changed after the deployment.
 
     .. warning::
@@ -1495,6 +1574,7 @@ def deploy_automated_lagoon_vault(
         # so the rest of the function body works unchanged
         parameters = config.parameters
         asset_manager = config.asset_manager
+        asset_managers = config.asset_managers
         safe_owners = config.safe_owners
         safe_threshold = config.safe_threshold
         uniswap_v2 = config.uniswap_v2
@@ -1526,13 +1606,18 @@ def deploy_automated_lagoon_vault(
         satellite_chain = config.satellite_chain
     else:
         # Legacy kwargs: validate required arguments
-        assert asset_manager is not None, "asset_manager required when config not provided"
         assert parameters is not None, "parameters required when config not provided"
         assert safe_owners is not None, "safe_owners required when config not provided"
         assert safe_threshold is not None, "safe_threshold required when config not provided"
         forge_cache_dir = None
         deploy_retries = 1
         satellite_chain = False
+
+    normalised_asset_managers = _normalise_asset_managers(asset_manager, asset_managers)
+    primary_asset_manager = normalised_asset_managers[0]
+    asset_manager = primary_asset_manager
+    if parameters.valuationManager is None:
+        parameters.valuationManager = primary_asset_manager
 
     legacy = vault_abi == "lagoon/Vault.json"
 
@@ -1764,7 +1849,7 @@ def deploy_automated_lagoon_vault(
         vault=vault_contract,
         deployer=deployer,
         owner=safe.address,
-        asset_manager=asset_manager,
+        asset_managers=normalised_asset_managers,
         module=module,
         uniswap_v2=uniswap_v2,
         uniswap_v3=uniswap_v3,
@@ -1880,7 +1965,8 @@ def deploy_automated_lagoon_vault(
         chain_id=chain_id,
         vault=vault_or_satellite,
         trading_strategy_module=module,
-        asset_manager=asset_manager,
+        asset_managers=normalised_asset_managers,
+        valuation_manager=parameters.valuationManager,
         multisig_owners=safe_owners,
         block_number=web3.eth.block_number,
         deployer=deployer.address,
