@@ -48,7 +48,12 @@ class GetOpenPositions(GetData):
     and liquidation thresholds.
     """
 
-    def __init__(self, config: GMXConfig, filter_swap_markets: bool = True, use_graphql: bool = False):
+    def __init__(
+        self,
+        config: GMXConfig,
+        filter_swap_markets: bool = True,
+        use_graphql: bool = False,
+    ):
         """Initialize open positions data provider.
 
         :param config: GMXConfig instance containing chain and network info
@@ -86,7 +91,10 @@ class GetOpenPositions(GetData):
             positions = self._get_data_via_rest_api(checksum_address)
             if positions:
                 return positions
-            logger.debug("REST API returned empty positions for %s; falling through to RPC for confirmation", checksum_address)
+            logger.debug(
+                "REST API returned empty positions for %s; falling through to RPC for confirmation",
+                checksum_address,
+            )
         except Exception as e:
             logger.warning("REST API v2 positions query failed, trying GraphQL: %s", e)
 
@@ -95,7 +103,10 @@ class GetOpenPositions(GetData):
             positions = self._get_data_via_graphql(checksum_address)
             if positions:
                 return positions
-            logger.debug("GraphQL returned empty positions for %s; falling through to RPC for confirmation", checksum_address)
+            logger.debug(
+                "GraphQL returned empty positions for %s; falling through to RPC for confirmation",
+                checksum_address,
+            )
         except Exception as e:
             logger.warning("GraphQL positions query failed, falling back to RPC: %s", e)
 
@@ -123,7 +134,11 @@ class GetOpenPositions(GetData):
         raw_positions = api.get_positions(address, use_cache=False)
 
         if not raw_positions:
-            logger.info('No positions found via REST API for address: "%s" on %s', address, chain_name.title())
+            logger.info(
+                'No positions found via REST API for address: "%s" on %s',
+                address,
+                chain_name.title(),
+            )
             return {}
 
         processed_positions: dict[str, Any] = {}
@@ -134,7 +149,11 @@ class GetOpenPositions(GetData):
                 key = f"{processed['market_symbol']}_{direction}"
                 processed_positions[key] = processed
             except Exception as e:
-                logger.warning("Failed to process REST API position %s: %s", pos.get("indexName", "?"), e)
+                logger.warning(
+                    "Failed to process REST API position %s: %s",
+                    pos.get("indexName", "?"),
+                    e,
+                )
                 continue
 
         logger.info(
@@ -295,23 +314,46 @@ class GetOpenPositions(GetData):
         # Subsquid stores addresses in checksummed format (case-sensitive)
         variables = {"account": address}
 
+        max_retries = 2
+        last_error: Exception | None = None
+        for attempt in range(1, max_retries + 1):
+            try:
+                response = requests.post(
+                    subgraph_url,
+                    json={"query": query, "variables": variables},
+                    headers={"Content-Type": "application/json"},
+                    timeout=30,
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                if "errors" in data:
+                    raise ValueError(f"GraphQL errors: {data['errors']}")
+                break  # success
+            except (
+                requests.exceptions.Timeout,
+                requests.exceptions.ConnectionError,
+            ) as e:
+                last_error = e
+                logger.warning(
+                    "GraphQL positions query attempt %d/%d failed: %s",
+                    attempt,
+                    max_retries,
+                    e,
+                )
+                if attempt == max_retries:
+                    raise last_error
+                continue
+
         try:
-            response = requests.post(
-                subgraph_url,
-                json={"query": query, "variables": variables},
-                headers={"Content-Type": "application/json"},
-                timeout=10,
-            )
-            response.raise_for_status()
-            data = response.json()
-
-            if "errors" in data:
-                raise ValueError(f"GraphQL errors: {data['errors']}")
-
             positions_data = data.get("data", {}).get("positions", [])
 
             if not positions_data:
-                logger.info('No positions found via GraphQL for address: "%s" on %s', address, chain_name.title())
+                logger.info(
+                    'No positions found via GraphQL for address: "%s" on %s',
+                    address,
+                    chain_name.title(),
+                )
                 return {}
 
             # Process GraphQL positions to match RPC format
@@ -412,7 +454,12 @@ class GetOpenPositions(GetData):
         collateral_oracle = get_oracle_address(chain_name, collateral_token)
         if collateral_oracle in prices:
             collateral_price_data = prices[collateral_oracle]
-            collateral_price = np.median([float(collateral_price_data["maxPriceFull"]), float(collateral_price_data["minPriceFull"])]) / 10 ** (PRECISION - collateral_decimals)
+            collateral_price = np.median(
+                [
+                    float(collateral_price_data["maxPriceFull"]),
+                    float(collateral_price_data["minPriceFull"]),
+                ]
+            ) / 10 ** (PRECISION - collateral_decimals)
         else:
             collateral_price = 1.0  # Assume $1 for stablecoins
 
@@ -505,7 +552,11 @@ class GetOpenPositions(GetData):
                 raise decode_error
 
             if len(raw_positions) == 0:
-                logger.info('No positions open for address: "%s" on %s.', address, chain_name.title())
+                logger.info(
+                    'No positions open for address: "%s" on %s.',
+                    address,
+                    chain_name.title(),
+                )
                 return {}
 
             processed_positions = {}
@@ -564,7 +615,11 @@ class GetOpenPositions(GetData):
                 for address, metadata in network_tokens_meta.items():
                     if address not in chain_tokens:
                         chain_tokens[address] = metadata
-                        logging.info("Added token from NETWORK_TOKENS_METADATA: %s (%s)", metadata["symbol"], address)
+                        logging.info(
+                            "Added token from NETWORK_TOKENS_METADATA: %s (%s)",
+                            metadata["symbol"],
+                            address,
+                        )
 
             return chain_tokens
 
@@ -649,10 +704,18 @@ class GetOpenPositions(GetData):
                         float(index_price_data["minPriceFull"]),
                     ]
                 ) / 10 ** (PRECISION - index_token_decimals)
-                logging.debug("Got oracle price for index token %s: $%.4f,", index_token_address, mark_price)
+                logging.debug(
+                    "Got oracle price for index token %s: $%.4f,",
+                    index_token_address,
+                    mark_price,
+                )
             else:
                 # Price not found in oracle, use entry price
-                logging.debug("Oracle price not found for index token %s (oracle address: %s), using entry price", index_token_address, oracle_index_token_address)
+                logging.debug(
+                    "Oracle price not found for index token %s (oracle address: %s), using entry price",
+                    index_token_address,
+                    oracle_index_token_address,
+                )
                 mark_price = entry_price
 
             # Get collateral token price for leverage calculation
@@ -666,15 +729,25 @@ class GetOpenPositions(GetData):
                         float(collateral_price_data["minPriceFull"]),
                     ]
                 ) / 10 ** (PRECISION - collateral_token_decimals)
-                logging.debug("Got oracle price for collateral token %s: $%.4f,", collateral_token_address, collateral_price)
+                logging.debug(
+                    "Got oracle price for collateral token %s: $%.4f,",
+                    collateral_token_address,
+                    collateral_price,
+                )
             else:
                 # Collateral price not found, assume $1 (for stablecoins) or use mark price (for same-asset collateral)
                 if index_token_address.lower() == collateral_token_address.lower():
                     collateral_price = mark_price
-                    logging.debug("Using mark price for collateral (same as index token): $%.4f,", collateral_price)
+                    logging.debug(
+                        "Using mark price for collateral (same as index token): $%.4f,",
+                        collateral_price,
+                    )
                 else:
                     collateral_price = 1.0
-                    logging.debug("Oracle price not found for collateral token %s, assuming $1 (stablecoin)", collateral_token_address)
+                    logging.debug(
+                        "Oracle price not found for collateral token %s, assuming $1 (stablecoin)",
+                        collateral_token_address,
+                    )
 
         except (KeyError, TypeError, ValueError) as e:
             logging.warning("Could not get oracle prices: %s", e)

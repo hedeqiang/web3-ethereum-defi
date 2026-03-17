@@ -31,6 +31,9 @@ class AsyncGMXSubsquidClient:
         self.chain = chain.lower()
         self.custom_endpoint = custom_endpoint
         self.session: aiohttp.ClientSession | None = None
+        #: Cached total market count — refreshed once per hour.
+        self._market_count: int | None = None
+        self._market_count_ts: float = 0.0
 
         # Get endpoint URLs (primary and backup)
         if custom_endpoint:
@@ -78,12 +81,27 @@ class AsyncGMXSubsquidClient:
         last_error = None
         for endpoint in endpoints_to_try:
             try:
+                logger.info(
+                    "Subsquid POST %s | variables=%s | query=%s",
+                    endpoint.split("/")[2],
+                    str(variables)[:120] if variables else "{}",
+                    query.strip()[:200],
+                )
                 async with self.session.post(
                     endpoint,
                     json=payload,
                     timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
-                    response.raise_for_status()
+                    if not response.ok:
+                        body = await response.text()
+                        logger.warning(
+                            "Subsquid %s returned HTTP %s | variables=%s | response_body=%s",
+                            endpoint.split("/")[2],
+                            response.status,
+                            str(variables)[:120] if variables else "{}",
+                            body[:500],
+                        )
+                        response.raise_for_status()
                     result = await response.json()
 
                     if "errors" in result:
@@ -95,7 +113,7 @@ class AsyncGMXSubsquidClient:
 
                     return result.get("data", {})
 
-            except (aiohttp.ClientError, TimeoutError) as e:
+            except (aiohttp.ClientError, TimeoutError, RuntimeError) as e:
                 last_error = e
                 logger.warning(
                     "Async Subsquid query failed on %s: %s",
@@ -106,6 +124,31 @@ class AsyncGMXSubsquidClient:
 
         # All endpoints failed
         raise last_error
+
+    async def get_market_count(self, ttl: int = 3600) -> int:
+        """Return total listed GMX markets, cached for ``ttl`` seconds.
+
+        :param ttl: Cache lifetime in seconds (default 3600).
+        :return: Total market count.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if self._market_count is not None and now - self._market_count_ts < ttl:
+            return self._market_count
+
+        query = "{ marketsConnection(orderBy: id_ASC) { totalCount } }"
+        try:
+            data = await self._query(query)
+            count = data.get("marketsConnection", {}).get("totalCount", 0)
+            if count > 0:
+                self._market_count = count
+                self._market_count_ts = now
+                logger.debug("get_market_count: %d markets", count)
+        except Exception as e:
+            logger.warning("get_market_count failed, using previous value: %s", e)
+
+        return self._market_count or 200
 
     async def get_market_infos(
         self,
@@ -125,7 +168,11 @@ class AsyncGMXSubsquidClient:
             where_clause = f'where: {{ marketTokenAddress_eq: "{market_address}" }}'
 
         # Debug logging
-        logger.debug("Querying marketInfos with market_address=%s, limit=%s", market_address, limit)
+        logger.debug(
+            "Querying marketInfos with market_address=%s, limit=%s",
+            market_address,
+            limit,
+        )
         logger.debug("Where clause: %s", where_clause)
 
         query = f"""

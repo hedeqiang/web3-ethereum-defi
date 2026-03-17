@@ -631,10 +631,16 @@ GMX_ERROR_SELECTORS: dict[str, tuple[str, list[str]]] = {
     "3a61a4a9": ("UnableToWithdrawCollateral", ["int256"]),
     "12110872": ("LiquidatablePosition", ["string", "int256", "int256", "int256"]),
     "9c693e4e": ("InvalidCollateralTokenForMarket", ["address", "address"]),
-    "919dd98a": ("PositionShouldNotBeLiquidated", ["string", "int256", "int256", "int256"]),
+    "919dd98a": (
+        "PositionShouldNotBeLiquidated",
+        ["string", "int256", "int256", "int256"],
+    ),
     "be2cbc10": ("InvalidDecreaseOrderSize", ["uint256", "uint256"]),
     # Price/execution errors
-    "cc32db99": ("NegativeExecutionPrice", ["int256", "uint256", "uint256", "int256", "uint256"]),
+    "cc32db99": (
+        "NegativeExecutionPrice",
+        ["int256", "uint256", "uint256", "int256", "uint256"],
+    ),
     "f0641c92": ("PriceImpactLargerThanOrderSize", ["int256", "uint256"]),
     "6514b64e": ("InvalidFeedPrice", ["address", "int256"]),
     "677abf1c": ("OracleTimestampsAreSmallerThanRequired", ["uint256", "uint256"]),
@@ -676,6 +682,85 @@ GMX_ERROR_SELECTORS: dict[str, tuple[str, list[str]]] = {
 }
 
 
+#: Human-readable parameter labels for all GMX custom errors.
+#: Each entry maps ``error_name -> list of label strings`` in the same order as ``GMX_ERROR_SELECTORS`` params.
+#: Used by :func:`decode_error_reason` to produce annotated output like
+#: ``MaxOpenInterestExceeded(currentOI: $219.64, maxAllowed: $1.00)`` instead of bare positional values.
+GMX_ERROR_PARAM_LABELS: dict[str, list[str]] = {
+    # Order errors
+    "InvalidDecreaseOrderSize": ["sizeDelta", "remainingPosition"],
+    "OrderNotFulfillableAtAcceptablePrice": ["executionPrice", "acceptablePrice"],
+    "UnsupportedOrderType": ["orderType"],
+    "OrderNotFound": ["orderKey"],
+    "InvalidKeeperForFrozenOrder": ["keeper"],
+    "OrderValidFromTimeNotReached": ["currentTime", "validFromTime"],
+    "MaxAutoCancelOrdersExceeded": ["count", "maxCount"],
+    "InvalidOrderPrices": ["minPrice", "maxPrice", "triggerPrice", "orderType"],
+    # Position errors
+    "PositionNotFound": ["positionKey"],
+    "MinPositionSize": ["sizeDelta", "minSize"],
+    "InvalidPositionSizeValues": ["size", "collateral"],
+    "InsufficientCollateralAmount": ["collateralAmount", "minCollateral"],
+    "InsufficientCollateralUsd": ["collateralUsd"],
+    "UnableToWithdrawCollateral": ["collateralUsd"],
+    "LiquidatablePosition": [
+        "reason",
+        "minCollateralFactor",
+        "remainingCollateralUsd",
+        "minCollateralUsd",
+    ],
+    "InvalidCollateralTokenForMarket": ["collateralToken", "market"],
+    "PositionShouldNotBeLiquidated": [
+        "reason",
+        "minCollateralFactor",
+        "remainingCollateralUsd",
+        "minCollateralUsd",
+    ],
+    # Price/execution errors
+    "NegativeExecutionPrice": [
+        "executionPrice",
+        "price",
+        "positionSizeInUsd",
+        "priceImpactUsd",
+        "sizeDeltaInTokens",
+    ],
+    "PriceImpactLargerThanOrderSize": ["priceImpact", "orderSize"],
+    "InvalidFeedPrice": ["token", "price"],
+    "OracleTimestampsAreSmallerThanRequired": ["oracleTimestamp", "requiredTimestamp"],
+    # Pool/reserve errors
+    "InsufficientPoolAmount": ["required", "available"],
+    "InsufficientReserve": ["required", "available"],
+    "MaxLongExceeded": ["currentLong", "maxLong"],
+    "MaxShortExceeded": ["currentShort", "maxShort"],
+    "MaxOpenInterestExceeded": ["currentOI", "maxAllowed"],
+    "MaxPoolAmountExceeded": ["currentAmount", "maxAmount"],
+    "MaxCollateralSumExceeded": ["currentSum", "maxSum"],
+    "MaxPoolUsdForDepositExceeded": ["currentUsd", "maxUsd"],
+    "InsufficientReserveForOpenInterest": ["required", "available"],
+    "DisabledMarket": ["market"],
+    # Output/swap errors
+    "InsufficientOutputAmount": ["minOutput", "actualOutput"],
+    "InsufficientSwapOutputAmount": ["minOutput", "actualOutput"],
+    "SwapPriceImpactExceedsAmountIn": ["amountIn", "priceImpact"],
+    "InvalidTokenIn": ["tokenIn", "market"],
+    "DuplicatedMarketInSwapPath": ["market"],
+    # Token/market errors
+    "MinMarketTokens": ["received", "minExpected"],
+    "MinLongTokens": ["received", "minExpected"],
+    "MinShortTokens": ["received", "minExpected"],
+    # Oracle errors
+    "EmptyPrimaryPrice": ["token"],
+    "MaxPriceAgeExceeded": ["oracleAge", "maxAge"],
+    # Gas/execution errors
+    "InsufficientExecutionFee": ["required", "provided"],
+    "InsufficientWntAmountForExecutionFee": ["required", "provided"],
+    "InsufficientExecutionGas": ["gasLimit", "gasLeft", "minHandleErrorGas"],
+    "InsufficientGasForCancellation": ["gasLeft", "minRequired"],
+    # Standard revert
+    "Error": ["message"],
+}
+
+
 def decode_error_reason(reason_bytes: bytes) -> str | None:
     """Decode GMX error reason from reasonBytes.
 
@@ -703,32 +788,35 @@ def decode_error_reason(reason_bytes: bytes) -> str | None:
             try:
                 params = _decode_error_params(reason_bytes[4:], param_types)
                 if params:
-                    # Format params nicely
+                    labels = GMX_ERROR_PARAM_LABELS.get(error_name, [])
                     param_strs = []
                     for i, (ptype, value) in enumerate(zip(param_types, params)):
+                        label = labels[i] if i < len(labels) else None
                         if ptype == "uint256":
                             # For USD values, try to format nicely
                             if value > 10**25:
                                 # Likely a USD value with 30 decimals
-                                param_strs.append(f"${value / GMX_USD_PRECISION:,.4f}")
+                                formatted = f"${value / GMX_USD_PRECISION:,.4f}"
                             elif value > 10**10:
                                 # Possibly a price with 12 decimals
-                                param_strs.append(f"${value / GMX_PRICE_PRECISION:,.2f}")
+                                formatted = f"${value / GMX_PRICE_PRECISION:,.2f}"
                             else:
-                                param_strs.append(str(value))
+                                formatted = str(value)
                         elif ptype == "int256":
                             if abs(value) > 10**25:
-                                param_strs.append(f"${value / GMX_USD_PRECISION:,.4f}")
+                                formatted = f"${value / GMX_USD_PRECISION:,.4f}"
                             else:
-                                param_strs.append(str(value))
+                                formatted = str(value)
                         elif ptype == "address":
-                            param_strs.append(f"0x{value[-40:]}")
+                            formatted = f"0x{value[-40:]}"
                         elif ptype == "bytes32":
-                            param_strs.append(f"0x{value.hex()[:16]}...")
+                            formatted = f"0x{value.hex()[:16]}..."
                         elif ptype == "string":
-                            param_strs.append(f'"{value}"')
+                            formatted = f'"{value}"'
                         else:
-                            param_strs.append(str(value))
+                            formatted = str(value)
+
+                        param_strs.append(f"{label}: {formatted}" if label else formatted)
 
                     return f"{error_name}({', '.join(param_strs)})"
             except Exception as e:

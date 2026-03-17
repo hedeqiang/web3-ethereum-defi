@@ -19,11 +19,16 @@ from typing import Any, Optional
 
 import requests
 from eth_utils import is_address, to_checksum_address
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
 from eth_defi.gmx.constants import GMX_MIN_DISPLAY_STAKE
-from eth_defi.gmx.contracts import GMX_SUBSQUID_ENDPOINTS, GMX_SUBSQUID_ENDPOINTS_BACKUP, get_tokens_metadata_dict
+from eth_defi.gmx.contracts import (
+    GMX_SUBSQUID_ENDPOINTS,
+    GMX_SUBSQUID_ENDPOINTS_BACKUP,
+    get_tokens_metadata_dict,
+)
 
 # Approximate volume thresholds used by the GMX interface (USD).
 # These are illustrative reference values; adjust as needed for production use.
@@ -100,13 +105,27 @@ class GMXSubsquidClient:
         self._tokens_metadata: Optional[dict[str, dict]] = None
         # Cache markets data (market_address -> {indexToken, longToken, shortToken})
         self._markets_cache: Optional[dict[str, dict]] = None
+        #: Cached total market count from marketsConnection.totalCount.
+        #: Refreshed once per hour — market listings change rarely.
+        self._market_count: Optional[int] = None
+        self._market_count_ts: float = 0.0
 
-        # HTTP session with connection pooling for better performance
+        # HTTP session with connection pooling and retry for transient errors
+        # (ConnectionResetError, SSLEOFError, etc. from Subsquid)
         self._session = requests.Session()
+        # One quick retry for transient TCP/SSL resets — fail fast so RPC fallback kicks in
+        _retry = Retry(
+            total=1,
+            connect=1,
+            read=1,
+            backoff_factor=0.2,  # 0.2s only
+            status_forcelist=[500, 502, 503, 504],
+            raise_on_status=False,
+        )
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=10,
             pool_maxsize=10,
-            max_retries=3,
+            max_retries=_retry,
         )
         self._session.mount("https://", adapter)
         self._session.mount("http://", adapter)
@@ -124,13 +143,13 @@ class GMXSubsquidClient:
         self,
         query: str,
         variables: Optional[dict[str, Any]] = None,
-        timeout: int = 60,
+        timeout: int = 30,
     ) -> dict[str, Any]:
         """Execute a GraphQL query with automatic failover to backup endpoint.
 
         :param query: GraphQL query string
         :param variables: Optional query variables
-        :param timeout: Request timeout in seconds (default 60)
+        :param timeout: Request timeout in seconds (default 30)
         :return: Query response data
         :raises requests.HTTPError: If the request fails on all endpoints
         :raises ValueError: If GraphQL returns errors
@@ -141,13 +160,30 @@ class GMXSubsquidClient:
 
         last_error = None
         for endpoint in endpoints_to_try:
+            payload = {"query": query, "variables": variables or {}}
+            logger.info(
+                "Subsquid POST %s | variables=%s | query=%s",
+                endpoint,
+                variables,
+                query.strip()[:200],
+            )
             try:
                 response = self._session.post(
                     endpoint,
-                    json={"query": query, "variables": variables or {}},
+                    json=payload,
                     headers={"Content-Type": "application/json"},
                     timeout=timeout,
                 )
+
+                if not response.ok:
+                    logger.warning(
+                        "Subsquid %s returned HTTP %s | variables=%s | response_body=%s",
+                        endpoint.split("/")[2],
+                        response.status_code,
+                        variables,
+                        response.text[:500],
+                    )
+
                 response.raise_for_status()
 
                 data = response.json()
@@ -178,8 +214,8 @@ class GMXSubsquidClient:
         self,
         query: str,
         variables: Optional[dict[str, Any]] = None,
-        timeout: int = 60,
-        max_retries: int = 3,
+        timeout: int = 30,
+        max_retries: int = 1,
         method_name: str = "query",
     ) -> dict[str, Any]:
         """Execute a GraphQL query with retry logic.
@@ -200,9 +236,9 @@ class GMXSubsquidClient:
                 return self._query(query, variables=variables, timeout=timeout)
             except Exception as e:
                 if attempt < max_retries - 1:
-                    backoff_time = 2 ** (attempt + 1)  # 2s, 4s, 8s
+                    backoff_time = 0.5  # fail fast — RPC fallback is solid
                     logger.warning(
-                        "Subsquid %s attempt %d/%d failed: %s. Retrying in %ds...",
+                        "Subsquid %s attempt %d/%d failed: %s. Retrying in %.1fs...",
                         method_name,
                         attempt + 1,
                         max_retries,
@@ -447,7 +483,7 @@ class GMXSubsquidClient:
             data = self._query_with_retry(
                 query,
                 variables=variables,
-                timeout=60,
+                timeout=30,
                 max_retries=3,
                 method_name="get_position_changes",
             )
@@ -506,6 +542,33 @@ class GMXSubsquidClient:
         stats = data.get("accountStats", [])
 
         return stats[0] if stats else None
+
+    def get_market_count(self, ttl: int = 3600) -> int:
+        """Return the total number of listed GMX markets, cached for ``ttl`` seconds.
+
+        Uses ``marketsConnection { totalCount }`` — a single lightweight query.
+        The result is used as the ``limit`` for :meth:`get_market_infos` so we
+        never over- or under-fetch when the number of markets changes.
+
+        :param ttl: Cache lifetime in seconds (default 3600 — listings change rarely).
+        :return: Total market count.
+        """
+        now = time.monotonic()
+        if self._market_count is not None and now - self._market_count_ts < ttl:
+            return self._market_count
+
+        query = "{ marketsConnection(orderBy: id_ASC) { totalCount } }"
+        try:
+            data = self._query(query)
+            count = data.get("marketsConnection", {}).get("totalCount", 0)
+            if count > 0:
+                self._market_count = count
+                self._market_count_ts = now
+                logger.debug("get_market_count: %d markets (cached for %ds)", count, ttl)
+        except Exception as e:
+            logger.warning("get_market_count failed, using previous value: %s", e)
+
+        return self._market_count or 200  # fall back to 200 if never succeeded
 
     def get_market_infos(
         self,
@@ -681,7 +744,7 @@ class GMXSubsquidClient:
         """
         data = self._query_with_retry(
             query,
-            timeout=60,
+            timeout=30,
             max_retries=3,
             method_name="fetch_daily_volumes",
         )
@@ -1075,7 +1138,7 @@ class GMXSubsquidClient:
             where: {
               account_eq: $account
               market_eq: $market
-              type_eq: "decrease"
+              type_eq: decrease
             }
           ) {
             id
@@ -1109,8 +1172,13 @@ class GMXSubsquidClient:
 
                     order_key = change.get("orderKey") or ""
 
-                    # Subsquid stores all monetary values with 30 decimal places.
-                    execution_price = float(self.from_fixed_point(str(change.get("executionPrice") or "0")))
+                    # Subsquid monetary conventions:
+                    #   - sizeDeltaUsd, basePnlUsd, feesAmount: 30-decimal fixed-point (divide by 10^30)
+                    #   - executionPrice: uses 10^(30 - token_decimals) format — NOT plain 10^30.
+                    #     Return it as a raw integer so the caller can apply the correct
+                    #     token-decimal-aware conversion (e.g. via _convert_price_to_usd).
+                    raw_execution_price = change.get("executionPrice")
+                    execution_price_raw = int(raw_execution_price) if raw_execution_price else 0
                     size_delta_usd = float(self.from_fixed_point(str(change.get("sizeDeltaUsd") or "0")))
                     pnl_usd = float(self.from_fixed_point(str(change.get("basePnlUsd") or "0"))) if change.get("basePnlUsd") else None
                     fees_usd = float(self.from_fixed_point(str(change.get("feesAmount") or "0")))
@@ -1129,10 +1197,10 @@ class GMXSubsquidClient:
 
                     order_type_name = self._GMX_ORDER_TYPE_NAMES.get(order_type_int, "unknown")
                     logger.info(
-                        "get_latest_position_close: found %s close for %s at price %.6f (order_type=%s, tx=%s)",
+                        "get_latest_position_close: found %s close for %s (raw_price=%s, order_type=%s, tx=%s)",
                         "long" if is_long else "short",
                         market_address,
-                        execution_price,
+                        execution_price_raw,
                         order_type_name,
                         tx_hash,
                     )
@@ -1141,7 +1209,7 @@ class GMXSubsquidClient:
                         "order_type_int": order_type_int,
                         "order_type": order_type_name,
                         "is_long": change.get("isLong"),
-                        "execution_price": execution_price,
+                        "execution_price_raw": execution_price_raw,
                         "size_delta_usd": size_delta_usd,
                         "pnl_usd": pnl_usd,
                         "fees_usd": fees_usd,
@@ -1260,6 +1328,7 @@ class GMXSubsquidClient:
         """
 
         # Query 3: orderById (fast and reliable for all order statuses)
+        # Note: Subsquid schema uses flat *TxnHash fields (not nested objects)
         query_order_by_id = """
         query GetOrderById($id: String!) {
           orderById(id: $id) {
@@ -1274,9 +1343,9 @@ class GMXSubsquidClient:
             cancelledReasonBytes
             frozenReason
             frozenReasonBytes
-            createdTxn { hash timestamp }
-            cancelledTxn { hash timestamp }
-            executedTxn { hash timestamp }
+            createdTxnHash
+            cancelledTxnHash
+            executedTxnHash
           }
         }
         """
@@ -1345,10 +1414,17 @@ class GMXSubsquidClient:
                 logger.debug("Variables: orderKey=%s", order_key)
                 logger.debug("=" * 70)
 
-                data = self._query(query_position_changes, variables={"orderKey": order_key}, timeout=60)
+                data = self._query(
+                    query_position_changes,
+                    variables={"orderKey": order_key},
+                    timeout=30,
+                )
                 changes = data.get("positionChanges", [])
 
-                logger.debug("positionChanges response: %s", json.dumps({"positionChanges": changes}, indent=2, default=str))
+                logger.debug(
+                    "positionChanges response: %s",
+                    json.dumps({"positionChanges": changes}, indent=2, default=str),
+                )
                 logger.debug("=" * 70)
 
                 if changes:
@@ -1375,7 +1451,10 @@ class GMXSubsquidClient:
                             "timestamp": change.get("timestamp"),
                         },
                     }
-                    logger.debug("Returning result from positionChanges: %s", json.dumps(result, indent=2, default=str))
+                    logger.debug(
+                        "Returning result from positionChanges: %s",
+                        json.dumps(result, indent=2, default=str),
+                    )
                     logger.debug("=" * 70)
                     return result
 
@@ -1394,21 +1473,25 @@ class GMXSubsquidClient:
                     data = self._query(query_order_by_id, variables={"id": order_key}, timeout=30)
                     order = data.get("orderById")
 
-                    logger.debug("orderById response: %s", json.dumps({"orderById": order}, indent=2, default=str))
+                    logger.debug(
+                        "orderById response: %s",
+                        json.dumps({"orderById": order}, indent=2, default=str),
+                    )
                     logger.debug("=" * 70)
 
                     if order:
                         # Convert order status to eventName format
+                        # Subsquid schema uses flat *TxnHash string fields (not nested objects)
                         status = order.get("status", "").lower()
                         if status == "executed":
                             event_name = "OrderExecuted"
-                            txn = order.get("executedTxn") or {}
+                            txn_hash = order.get("executedTxnHash")
                         elif status == "cancelled":
                             event_name = "OrderCancelled"
-                            txn = order.get("cancelledTxn") or {}
+                            txn_hash = order.get("cancelledTxnHash")
                         elif status == "frozen":
                             event_name = "OrderFrozen"
-                            txn = order.get("createdTxn") or {}
+                            txn_hash = order.get("createdTxnHash")
                         elif status == "created":
                             # Order still pending - don't return yet
                             logger.debug("Order is still in Created status, continuing to poll")
@@ -1416,7 +1499,21 @@ class GMXSubsquidClient:
                             continue
                         else:
                             event_name = f"Order{status.title()}"
-                            txn = order.get("createdTxn") or {}
+                            txn_hash = order.get("createdTxnHash")
+
+                        # cancelledReason is always "" in Subsquid — decode the bytes instead
+                        reason = order.get("cancelledReason") or order.get("frozenReason") or ""
+                        reason_bytes_hex = order.get("cancelledReasonBytes") or order.get("frozenReasonBytes") or ""
+                        if not reason and reason_bytes_hex:
+                            try:
+                                from eth_defi.gmx.events import decode_error_reason
+
+                                raw = bytes.fromhex(reason_bytes_hex.replace("0x", ""))
+                                decoded = decode_error_reason(raw)
+                                if decoded:
+                                    reason = decoded
+                            except Exception:
+                                pass
 
                         result = {
                             "eventName": event_name,
@@ -1426,15 +1523,18 @@ class GMXSubsquidClient:
                             "sizeDeltaUsd": str(order.get("sizeDeltaUsd") or 0),
                             "acceptablePrice": str(order.get("acceptablePrice") or 0),
                             "triggerPrice": str(order.get("triggerPrice") or 0),
-                            "reason": order.get("cancelledReason") or order.get("frozenReason") or "",
-                            "reasonBytes": order.get("cancelledReasonBytes") or order.get("frozenReasonBytes") or "",
-                            "timestamp": txn.get("timestamp"),
+                            "reason": reason,
+                            "reasonBytes": reason_bytes_hex,
+                            "timestamp": None,
                             "transaction": {
-                                "hash": txn.get("hash"),
-                                "timestamp": txn.get("timestamp"),
+                                "hash": txn_hash,
+                                "timestamp": None,
                             },
                         }
-                        logger.debug("Returning result from orderById: %s", json.dumps(result, indent=2, default=str))
+                        logger.debug(
+                            "Returning result from orderById: %s",
+                            json.dumps(result, indent=2, default=str),
+                        )
                         logger.debug("=" * 70)
                         return result
                 except Exception as e:
