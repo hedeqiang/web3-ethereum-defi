@@ -1,0 +1,27 @@
+symbol: VUSD
+name: Vow USD
+short_description: Vow USD (VUSD) is a dollar-pegged stablecoin by the Vow Foundation, related to tokenised retail discount vouchers. It appears to be dead or pre-launch.
+long_description: |
+  VUSD is associated with the [Vow Foundation](https://vow.foundation/), whose model involves
+  tokenising retail discount vouchers. Technical details about VUSD are scarce.
+
+  ## Status
+
+  Largely dead. Trades at a fraction of $1 (around $0.01) with negligible volume.
+
+  ## Sources
+
+  - [CoinGecko — Vow USD](https://www.coingecko.com/en/coins/vow-usd)
+  - [Vow Foundation](https://vow.foundation/)
+category: stablecoin
+links:
+  homepage: https://vow.foundation/
+  coingecko: https://www.coingecko.com/en/coins/vow-usd
+  defillama: ''
+  twitter: https://x.com/Vowcurrency
+slug: vusd-vow
+checks:
+  twitter_last_post_at: '2025-11-30'
+  domain_up_at: '2026-03-17'
+  marked_dead_at: ''
+  information_found_missing_at: ''

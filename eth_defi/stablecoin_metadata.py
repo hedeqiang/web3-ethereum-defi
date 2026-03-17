@@ -54,6 +54,123 @@ Required environment variables (shared with vault protocol metadata):
 - ``R2_VAULT_METADATA_SECRET_ACCESS_KEY``
 - ``R2_VAULT_METADATA_ENDPOINT_URL``
 - ``R2_VAULT_METADATA_PUBLIC_URL``
+
+YAML file format
+~~~~~~~~~~~~~~~~
+
+Each file in ``eth_defi/data/stablecoins/`` describes one token symbol.
+Files come in two shapes: *standard* (one project per symbol) and *entries*
+(multiple competing projects that share the same symbol).
+
+**Standard file** — all fields at the top level:
+
+.. code-block:: yaml
+
+    symbol: USDC                          # token ticker as used on-chain
+    name: USD Coin (Circle)               # full human-readable name
+    slug: usdc                            # lowercase identifier, matches filename stem
+    category: stablecoin                  # stablecoin | yield_bearing | wrapped
+    short_description: |                  # 1–3 sentence summary
+      USD Coin is...
+    long_description: |                   # multi-paragraph Markdown (empty string = not yet written)
+      [USD Coin](https://circle.com/) is...
+    token_symbols:                        # optional: additional ticker variants
+      - USDC
+      - USDC.e
+    links:
+      homepage: https://circle.com/usdc  # project website (empty string if unknown)
+      coingecko: https://...             # CoinGecko listing URL (empty string if not listed)
+      defillama: https://...             # DeFiLlama stablecoin page URL (empty string if none)
+      twitter: https://x.com/circle     # official X/Twitter account URL (empty string if unknown)
+    contract_addresses:                   # known on-chain deployments
+      - chain: ethereum                   # chain slug (ethereum, arbitrum, base, …)
+        address: '0xA0b8...'             # checksummed ERC-20 address
+    checks:                               # automated liveness checks (omitted if checks not run yet)
+      twitter_last_post_at: '2026-03-17' # YYYY-MM-DD of most recent post, or empty string
+      domain_up_at: '2026-03-17'         # YYYY-MM-DD when homepage last responded, or empty string
+      marked_dead_at: ''                  # YYYY-MM-DD when confirmed dead, or empty string
+      information_found_missing_at: ''    # YYYY-MM-DD when no info was findable, or empty string
+
+**Entries file** — used when multiple unrelated projects share the same symbol.
+The top level holds only ``symbol``, ``slug``, ``category``, and optionally
+``token_symbols``; each entry under ``entries:`` carries the remaining fields:
+
+.. code-block:: yaml
+
+    symbol: RUSD
+    slug: rusd
+    category: stablecoin
+    entries:
+      - name: Reservoir rUSD
+        short_description: ...
+        long_description: |
+          ...
+        links:
+          homepage: https://reservoir.xyz/
+          coingecko: ''
+          defillama: ''
+          twitter: https://x.com/reservoir_xyz
+        contract_addresses:
+          - chain: ethereum
+            address: '0x09D4...'
+        checks:
+          twitter_last_post_at: ''
+          domain_up_at: '2026-03-17'
+          marked_dead_at: ''
+          information_found_missing_at: ''
+      - name: Another rUSD
+        ...
+
+**Empty-string convention** — all optional string fields use ``''`` (empty string)
+as the *not yet known* marker. The JSON export normalises these to ``null``.
+
+Maintaining stablecoin files
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Several Claude Code skills automate common maintenance tasks.  Invoke them
+with the ``/skill-name`` command in the chat prompt.
+
+**Adding or updating descriptions**
+
+The ``long_description`` and ``links.twitter`` fields are filled manually or
+with AI assistance.  Use an AI agent (spawning 8 parallel sub-agents is a good
+batch size) and point it at ``eth_defi/data/stablecoins/``.  The agent should
+use ``WebSearch`` to research each stablecoin and write a 2–4 paragraph
+Markdown description in the ``long_description`` field.  Empty string ``''``
+is the marker for "not yet written".
+
+**Checking liveness** — ``/check-stablecoins``
+
+The ``check-stablecoins`` skill audits all YAML files for liveness:
+
+- Checks whether ``links.twitter`` accounts are still active and records the
+  date of the most recent post in ``checks.twitter_last_post_at``.
+- Checks whether ``links.homepage`` domains are reachable and records the
+  date in ``checks.domain_up_at``.
+- Sets ``checks.marked_dead_at`` when strong evidence of shutdown is found
+  (domain down *and* last tweet more than 6 months ago).
+- Sets ``checks.information_found_missing_at`` when no links exist at all.
+- Appends a ``## Status`` section to ``long_description`` if wind-down news
+  is found.
+
+Run it periodically (e.g. monthly) to keep the ``checks`` block current.
+
+**Logos** — ``/extract-project-logo`` and ``/post-process-logo``
+
+Logo files live in ``eth_defi/data/stablecoins/formatted_logos/{slug}/``.
+The only supported variant is ``light.png`` (256 × 256 PNG, suitable for
+display on light backgrounds).
+
+Workflow to add a logo for a new stablecoin:
+
+1. Run ``/extract-project-logo`` — point it at the project website.
+   It searches the brand kit, GitHub, meta tags, and CoinGecko in order of
+   preference and saves the raw source file.
+2. Run ``/post-process-logo`` — pass the raw source folder and the output
+   path ``eth_defi/data/stablecoins/formatted_logos/{slug}/``.
+   It converts to PNG, adds transparent padding to make the image square,
+   and scales to 256 × 256.
+3. Re-run the export script to upload the new logo to R2.
 """
 
 import json
@@ -322,6 +439,32 @@ class StablecoinLogos(TypedDict):
     light: str | None
 
 
+class StablecoinContractAddress(TypedDict):
+    """A contract address entry for a stablecoin on a specific chain."""
+
+    #: Chain name (e.g. ``ethereum``, ``arbitrum``, ``base``)
+    chain: str
+
+    #: Contract address (checksummed hex, may be ``None`` if unknown)
+    address: str | None
+
+
+class StablecoinChecks(TypedDict):
+    """Automated liveness checks for a stablecoin project."""
+
+    #: Date (YYYY-MM-DD) of the most recent Twitter/X post, or empty string if unknown/missing
+    twitter_last_post_at: str
+
+    #: Date (YYYY-MM-DD) when the homepage was last confirmed reachable, or empty string
+    domain_up_at: str
+
+    #: Date (YYYY-MM-DD) when the project was confirmed dead, or empty string if alive/unknown
+    marked_dead_at: str
+
+    #: Date (YYYY-MM-DD) when liveness could not be determined (no links found), or empty string
+    information_found_missing_at: str
+
+
 class StablecoinMetadata(TypedDict):
     """Complete stablecoin metadata as exported to JSON."""
 
@@ -334,7 +477,13 @@ class StablecoinMetadata(TypedDict):
     #: Human-readable name
     name: str
 
-    #: Description of the stablecoin
+    #: Short description of the stablecoin (same as ``description`` for backwards compatibility)
+    short_description: str | None
+
+    #: Long description of the stablecoin (may be empty)
+    long_description: str | None
+
+    #: Short description (kept for backwards compatibility, same value as ``short_description``)
     description: str | None
 
     #: Category: ``stablecoin``, ``yield_bearing``, or ``wrapped``
@@ -345,6 +494,12 @@ class StablecoinMetadata(TypedDict):
 
     #: Logo URLs
     logos: StablecoinLogos
+
+    #: Known contract addresses across chains (may be empty list if unknown)
+    contract_addresses: list[StablecoinContractAddress]
+
+    #: Automated liveness checks (``None`` if checks have not been run yet)
+    checks: StablecoinChecks | None
 
 
 def read_stablecoin_metadata(yaml_path: Path) -> dict:
@@ -398,7 +553,7 @@ def load_all_stablecoin_metadata() -> dict[str, list[StablecoinInfo]]:
                     StablecoinInfo(
                         name=entry.get("name", ""),
                         homepage=links.get("homepage", ""),
-                        description=entry.get("description", ""),
+                        description=entry.get("short_description", ""),
                         coingecko=links.get("coingecko", ""),
                         defillama=links.get("defillama", ""),
                         twitter=links.get("twitter", ""),
@@ -410,7 +565,7 @@ def load_all_stablecoin_metadata() -> dict[str, list[StablecoinInfo]]:
                 StablecoinInfo(
                     name=data.get("name", ""),
                     homepage=links.get("homepage", ""),
-                    description=data.get("description", ""),
+                    description=data.get("short_description", ""),
                     coingecko=links.get("coingecko", ""),
                     defillama=links.get("defillama", ""),
                     twitter=links.get("twitter", ""),
@@ -543,35 +698,68 @@ def build_stablecoin_metadata_json(yaml_path: Path, public_url: str = "") -> lis
         "light": f"{public_url}/stablecoin-metadata/{slug}/light.png" if available["light"] and public_url else None,
     }
 
+    def parse_contract_addresses(source: dict) -> list[StablecoinContractAddress]:
+        raw = source.get("contract_addresses") or []
+        return [
+            StablecoinContractAddress(
+                chain=entry.get("chain", ""),
+                address=entry.get("address") or None,
+            )
+            for entry in raw
+        ]
+
+    def parse_checks(source: dict) -> StablecoinChecks | None:
+        raw = source.get("checks")
+        if raw is None:
+            return None
+        return StablecoinChecks(
+            twitter_last_post_at=raw.get("twitter_last_post_at") or "",
+            domain_up_at=raw.get("domain_up_at") or "",
+            marked_dead_at=raw.get("marked_dead_at") or "",
+            information_found_missing_at=raw.get("information_found_missing_at") or "",
+        )
+
     if "entries" in data:
         result = []
         for entry in data["entries"]:
             links_data = entry.get("links", {})
             links: StablecoinLinks = {field: normalise(links_data.get(field)) for field in STABLECOIN_LINK_FIELDS}
+            short_desc = normalise(entry.get("short_description"))
+            long_desc = normalise(entry.get("long_description"))
             result.append(
                 StablecoinMetadata(
                     symbol=symbol,
                     slug=slug,
                     name=entry.get("name", ""),
-                    description=normalise(entry.get("description")),
+                    short_description=short_desc,
+                    long_description=long_desc,
+                    description=short_desc,
                     category=category,
                     links=links,
                     logos=logos,
+                    contract_addresses=parse_contract_addresses(entry),
+                    checks=parse_checks(entry),
                 )
             )
         return result
     else:
         links_data = data.get("links", {})
         links: StablecoinLinks = {field: normalise(links_data.get(field)) for field in STABLECOIN_LINK_FIELDS}
+        short_desc = normalise(data.get("short_description"))
+        long_desc = normalise(data.get("long_description"))
         return [
             StablecoinMetadata(
                 symbol=symbol,
                 slug=slug,
                 name=data.get("name", ""),
-                description=normalise(data.get("description")),
+                short_description=short_desc,
+                long_description=long_desc,
+                description=short_desc,
                 category=category,
                 links=links,
                 logos=logos,
+                contract_addresses=parse_contract_addresses(data),
+                checks=parse_checks(data),
             )
         ]
 

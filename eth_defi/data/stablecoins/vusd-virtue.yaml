@@ -1,0 +1,35 @@
+symbol: VUSD
+name: Virtue USD
+short_description: Virtue USD (VUSD) is an overcollateralised stablecoin from the Virtue protocol on IOTA. Users mint VUSD by locking IOTA or stIOTA as collateral with fixed predictable fees.
+long_description: |
+  Virtue USD is issued by [Virtue Protocol](https://virtue.money/) on the
+  [IOTA](https://www.iota.org/) network (Move-based VM).
+
+  ## Mechanism
+
+  - Overcollateralised CDP model (similar to Liquity)
+  - Collateral: IOTA and stIOTA
+  - Fixed predictable fees (no variable interest rates)
+  - Stability Pool for yield and liquidation absorption
+
+  ## Status
+
+  Active but small. Launched in July 2025 on IOTA Rebased Mainnet.
+  Trades on Pools Finance DEX.
+
+  ## Sources
+
+  - [CoinGecko — Virtue USD](https://www.coingecko.com/en/coins/virtue-usd)
+  - [Virtue Protocol](https://virtue.money/)
+category: stablecoin
+links:
+  homepage: https://virtue.money/
+  coingecko: https://www.coingecko.com/en/coins/virtue-usd
+  defillama: ''
+  twitter: https://x.com/Virtue_Money
+slug: vusd-virtue
+checks:
+  twitter_last_post_at: '2025-07-10'
+  domain_up_at: '2026-03-17'
+  marked_dead_at: ''
+  information_found_missing_at: ''
