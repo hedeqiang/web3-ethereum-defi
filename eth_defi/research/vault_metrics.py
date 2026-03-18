@@ -1528,6 +1528,8 @@ def calculate_lifetime_metrics(
     # Add ranking columns
     results_df = calculate_vault_rankings(results_df)
 
+    results_df["generated_at"] = pd.Timestamp(native_datetime_utc_now())
+
     return results_df
 
 
@@ -1976,6 +1978,9 @@ def format_lifetime_table(
     # Offchain descriptions are exported via JSON API, not human-readable table
     _del("description")
     _del("short_description")
+
+    # Metadata timestamp, not relevant for human-readable table
+    _del("generated_at")
 
     if not add_share_token:
         _del("share_token")
