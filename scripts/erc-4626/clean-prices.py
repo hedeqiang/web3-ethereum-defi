@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Clean raw scanned vault data.
 
 - Reads ``vault-prices-1h.parquet`` and generates ``vault-prices-1h-cleaned.parquet``
