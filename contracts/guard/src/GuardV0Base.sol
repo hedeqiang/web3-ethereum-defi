@@ -263,13 +263,6 @@ abstract contract GuardV0Base is IGuard, Multicall {
     // Implementation needs to provide its own ownership policy hooks
     function getGovernanceAddress() public view virtual returns (address);
 
-    /**
-     * Calculate Solidity 4-byte function selector from a string.
-     */
-    function getSelector(string memory _func) internal pure returns (bytes4) {
-        // https://solidity-by-example.org/function-selector/
-        return bytes4(keccak256(bytes(_func)));
-    }
 
     /**
      * Track version during internal development.

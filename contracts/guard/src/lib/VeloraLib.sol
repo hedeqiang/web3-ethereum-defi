@@ -27,6 +27,15 @@
 //   - This caps the maximum loss per transaction to amountIn of tokenIn
 //     and ensures the Safe receives meaningful output
 //
+// Trade-off: the balance-envelope approach does not prevent a flash-loan
+// from inflating preBalanceIn/preBalanceOut between this snapshot and the
+// swap execution, which could widen the acceptable output range. This is a
+// known limitation accepted at time of writing because the Augustus API
+// does not expose a stable, version-stable payload schema that would allow
+// robust on-chain decoding of the destination address and sub-call routing.
+// If Augustus adds such support in a future version, explicit calldata
+// validation should replace or supplement the balance-envelope check.
+//
 // Compare with CowSwap which constructs orders from validated params
 // (no opaque blob) — Velora cannot do this due to the API-driven calldata.
 

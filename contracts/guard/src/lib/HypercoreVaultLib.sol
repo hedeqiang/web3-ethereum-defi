@@ -116,8 +116,11 @@ library HypercoreVaultLib {
         if (selector == SEL_SEND_RAW_ACTION) {
             (uint24 actionId, address dest) = _validateAction(target, callData);
             if (actionId == VAULT_TRANSFER_ACTION) {
-                // anyAsset: skip per-vault whitelisting — governed but dangerous,
-                // allows deposit/withdraw to ANY Hypercore vault address.
+                // anyAsset: skip per-vault whitelisting — this is intentional behaviour.
+                // The flag is set by governance (onlyGuardOwner) and allows deposit/withdraw
+                // to any Hypercore vault address. No timelock is required because all guard
+                // configuration changes are already gated behind the governance multisig;
+                // the governance process itself is the safeguard.
                 if (!anyAsset) {
                     require(
                         _storage().allowedHypercoreVaults[dest],

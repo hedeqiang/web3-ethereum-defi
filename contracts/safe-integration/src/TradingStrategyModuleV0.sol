@@ -57,6 +57,11 @@ contract TradingStrategyModuleV0 is Module, GuardV0Base {
     /// @dev Initialize function, will be triggered when a new proxy is deployed
     /// @param initializeParams Parameters of initialization encoded
     /// https://gist.github.com/auryn-macmillan/841906d0bc6c2624e83598cdfac17de8
+    // Note: setUp() is public to satisfy the Zodiac FactoryFriendly interface, but
+    // TradingStrategyModuleV0 is always deployed via its constructor (never as a
+    // minimal proxy clone). The constructor calls setUp() immediately, so the
+    // initializer modifier locks the function before any external call can reach it.
+    // A proxy front-run is therefore not possible with this deployment pattern.
     function setUp(bytes memory initializeParams) public override initializer {
         __Ownable_init(msg.sender);
         (address _owner, address _target) = abi.decode(
