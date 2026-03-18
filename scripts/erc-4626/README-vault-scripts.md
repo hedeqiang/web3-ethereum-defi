@@ -297,6 +297,12 @@ poetry run python scripts/erc-4626/vault-analysis-json.py
 |----------|-------------|
 | `OUTPUT_JSON` | Optional. Output file path. |
 
+After generating, upload to R2 with rclone:
+
+```shell
+rclone copy ~/.tradingstrategy/top_vaults_by_chain.json vaults-storage:top-defi-vaults/
+```
+
 ### vault-analysis-gsheet.py
 
 Vault analysis with Google Sheets upload and lifetime metric analysis.
