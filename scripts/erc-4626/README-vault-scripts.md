@@ -289,13 +289,15 @@ Scripts for generating analysis reports and statistics.
 
 Multi-chain vault analysis with JSON export and lifetime metric analysis.
 
+In production, run with `OUTPUT_JSON` pointing to the upload path:
+
 ```shell
-poetry run python scripts/erc-4626/vault-analysis-json.py
+OUTPUT_JSON=~/.tradingstrategy/top_vaults_by_chain.json poetry run python scripts/erc-4626/vault-analysis-json.py
 ```
 
 | Variable | Description |
 |----------|-------------|
-| `OUTPUT_JSON` | Optional. Output file path. |
+| `OUTPUT_JSON` | Optional. Output file path. Default: `~/.tradingstrategy/vaults/stablecoin-vault-metrics.json`. |
 
 After generating, upload to R2 with rclone:
 
