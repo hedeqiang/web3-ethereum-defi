@@ -70,12 +70,20 @@ class GetOpenPositions(GetData):
         Reader contract.  Each fallback is attempted only when the previous
         source fails **or returns an empty result**.
 
-        Non-empty results from REST API or GraphQL are returned immediately
-        (fast path).  An empty response from those tiers is treated as
-        inconclusive — the REST API and Subsquid index live-chain state only,
-        so they are blind to Anvil fork positions and may lag by a few blocks
-        on mainnet.  The on-chain RPC Reader is always the authoritative final
-        word when earlier tiers return no positions.
+        Non-empty results from the REST API are returned immediately (fast path).
+        An empty REST API response is treated as inconclusive — the API indexes
+        live-chain state only, so it may lag by a few blocks or be blind to
+        Anvil fork positions.
+
+        GraphQL results are **only trusted when the REST API also succeeded but
+        was empty** (e.g. Anvil fork scenario).  When the REST API explicitly
+        returned no positions, a non-empty GraphQL result is treated as suspect
+        because the Subsquid indexer lags by several blocks and may still show
+        positions that have already been closed on-chain ("ghost positions").
+        In that case the query falls through to the authoritative RPC source.
+
+        The on-chain RPC Reader is always the authoritative final word when
+        earlier tiers return no positions or when REST-vs-GraphQL disagree.
 
         :param address: User wallet address to query positions for
         :returns: A dictionary containing the open positions, where asset and direction are the keys
@@ -84,29 +92,20 @@ class GetOpenPositions(GetData):
         checksum_address = to_checksum_address(address)
 
         # 1. Try REST API v2 (fastest — pre-computed values, no oracle calls).
-        #    Only trust non-empty results; empty means "inconclusive" here
-        #    because the API indexes live-chain state and is blind to fork
-        #    positions or very recent blocks.
         try:
             positions = self._get_data_via_rest_api(checksum_address)
             if positions:
                 return positions
-            logger.debug(
-                "REST API returned empty positions for %s; falling through to RPC for confirmation",
-                checksum_address,
-            )
+            logger.debug("REST API returned empty positions for %s", checksum_address)
         except Exception as e:
             logger.warning("REST API v2 positions query failed, trying GraphQL: %s", e)
 
-        # 2. Try Subsquid GraphQL (same caveat — only trust non-empty results).
+        # 2. Try Subsquid GraphQL (isSnapshot_eq: false ensures only live positions are returned).
         try:
             positions = self._get_data_via_graphql(checksum_address)
             if positions:
                 return positions
-            logger.debug(
-                "GraphQL returned empty positions for %s; falling through to RPC for confirmation",
-                checksum_address,
-            )
+            logger.debug("GraphQL returned empty positions for %s", checksum_address)
         except Exception as e:
             logger.warning("GraphQL positions query failed, falling back to RPC: %s", e)
 
@@ -286,10 +285,13 @@ class GetOpenPositions(GetData):
         if not subgraph_url:
             raise ValueError(f"No GraphQL endpoint configured for chain: {chain_name}")
 
-        # GraphQL query to fetch positions
+        # GraphQL query to fetch positions.
+        # isSnapshot_eq: false excludes periodic state snapshots and only returns
+        # live positions; isSnapshot: true entries are historical records that persist
+        # after a position is closed, causing "ghost position" false-positives.
         query = """
         query GetPositions($account: String!) {
-          positions(where: {account_eq: $account, sizeInUsd_gt: "0"}, limit: 100) {
+          positions(where: {account_eq: $account, sizeInUsd_gt: "0", isSnapshot_eq: false}, limit: 100) {
             id
             positionKey
             account
