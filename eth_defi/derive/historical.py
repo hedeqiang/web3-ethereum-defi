@@ -931,30 +931,36 @@ class DeriveFundingRateDatabase:
                 DERIVE_MULTICALL3_DEPLOYMENT_BLOCK,
             )
 
-            calls.append(EncodedCall.from_keccak_signature(
-                address=addr,
-                function=f"{name}/openInterest",
-                signature=oi_selector,
-                data=oi_data,
-                extra_data={"instrument": name, "field": "open_interest"},
-                first_block_number=first_block,
-            ))
-            calls.append(EncodedCall.from_keccak_signature(
-                address=addr,
-                function=f"{name}/getPerpPrice",
-                signature=perp_price_selector,
-                data=b"",
-                extra_data={"instrument": name, "field": "perp_price"},
-                first_block_number=first_block,
-            ))
-            calls.append(EncodedCall.from_keccak_signature(
-                address=addr,
-                function=f"{name}/getIndexPrice",
-                signature=index_price_selector,
-                data=b"",
-                extra_data={"instrument": name, "field": "index_price"},
-                first_block_number=first_block,
-            ))
+            calls.append(
+                EncodedCall.from_keccak_signature(
+                    address=addr,
+                    function=f"{name}/openInterest",
+                    signature=oi_selector,
+                    data=oi_data,
+                    extra_data={"instrument": name, "field": "open_interest"},
+                    first_block_number=first_block,
+                )
+            )
+            calls.append(
+                EncodedCall.from_keccak_signature(
+                    address=addr,
+                    function=f"{name}/getPerpPrice",
+                    signature=perp_price_selector,
+                    data=b"",
+                    extra_data={"instrument": name, "field": "perp_price"},
+                    first_block_number=first_block,
+                )
+            )
+            calls.append(
+                EncodedCall.from_keccak_signature(
+                    address=addr,
+                    function=f"{name}/getIndexPrice",
+                    signature=index_price_selector,
+                    data=b"",
+                    extra_data={"instrument": name, "field": "index_price"},
+                    first_block_number=first_block,
+                )
+            )
             call_instrument_names.append(name)
 
         logger.info(
@@ -965,12 +971,16 @@ class DeriveFundingRateDatabase:
             OI_BLOCK_STEP,
             max_workers,
         )
+        print(f"Scan start: {global_start.strftime('%Y-%m-%d %H:%M')} UTC")
 
         web3factory = TunedWeb3Factory(rpc_url)
 
         results: dict[str, int] = {name: 0 for name in ranges}
         total_new = 0
         since_checkpoint = 0
+
+        def _progress_suffix() -> dict:
+            return {"written": _format_count(total_new)}
 
         for combined in read_multicall_historical(
             chain_id=DERIVE_CHAIN_ID,
@@ -981,6 +991,7 @@ class DeriveFundingRateDatabase:
             step=OI_BLOCK_STEP,
             max_workers=max_workers,
             display_progress="Fetching perp snapshots (parallel multicall)",
+            progress_suffix=_progress_suffix,
         ):
             # Parse the combined result into per-instrument entries.
             # Results are in the same order as the calls list.
