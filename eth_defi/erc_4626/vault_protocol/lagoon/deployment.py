@@ -70,6 +70,24 @@ CONTRACTS_ROOT = Path(os.path.dirname(__file__)) / ".." / ".." / ".." / ".." / "
 
 DEFAULT_LAGOON_VAULT_ABI = "v0.5.0/Vault.sol"
 
+
+def should_enable_hypercore_guard(
+    *,
+    chain_id: int,
+    any_asset: bool,
+    hypercore_vaults: list[HexAddress | str] | None,
+) -> bool:
+    """Should Hypercore guard support be enabled for this deployment.
+
+    ``any_asset=True`` intentionally bypasses per-vault Hypercore address
+    checks, but Hypercore deposits and withdrawals still require CoreWriter
+    actions and CoreDepositWallet approval/target validation to be whitelisted.
+    """
+    from eth_defi.hyperliquid.core_writer import CORE_DEPOSIT_WALLET
+
+    return bool(hypercore_vaults) or (any_asset and chain_id in CORE_DEPOSIT_WALLET)
+
+
 # struct InitStruct {
 #     IERC20 underlying;
 #     string name;
@@ -1409,9 +1427,13 @@ def setup_guard(
     else:
         logger.info("Not whitelisted: CCTP")
 
-    # Whitelist Hypercore native vaults (HyperEVM only)
+    # Whitelist Hypercore native vault support (HyperEVM only).
     # Batch CoreWriter + all vault whitelisting into a single multicall transaction.
-    if hypercore_vaults:
+    if should_enable_hypercore_guard(
+        chain_id=web3.eth.chain_id,
+        any_asset=any_asset,
+        hypercore_vaults=hypercore_vaults,
+    ):
         from eth_defi.hyperliquid.core_writer import CORE_WRITER_ADDRESS
         from eth_defi.hyperliquid.guard_whitelist import get_core_deposit_wallet
 
@@ -1423,45 +1445,57 @@ def setup_guard(
             cdw_address,
         )
 
-        # The deposit multicall calls approve(USDC) as its first step,
-        # so the underlying token must be whitelisted for transfer/approve.
-        if vault is not None:
-            underlying_address = Web3.to_checksum_address(vault.functions.asset().call())
-        elif underlying_token_address is not None:
-            underlying_address = Web3.to_checksum_address(underlying_token_address)
-        else:
-            raise ValueError("hypercore_vaults requires either vault or underlying_token_address")
+        multicalls = []
 
-        multicalls = [
-            module.functions.whitelistToken(
-                underlying_address,
-                "Underlying token for Hypercore deposit approve",
-            ),
+        # The bridge flow starts with approve(USDC, CoreDepositWallet).
+        # In explicit-asset mode we must whitelist the underlying token.
+        # In anyAsset mode token-level call site checks are intentionally bypassed,
+        # so only CoreDepositWallet/CoreWriter permissions need to be installed.
+        if not any_asset:
+            if vault is not None:
+                underlying_address = Web3.to_checksum_address(vault.functions.asset().call())
+            elif underlying_token_address is not None:
+                underlying_address = Web3.to_checksum_address(underlying_token_address)
+            else:
+                raise ValueError("Hypercore guard setup without any_asset requires either vault or underlying_token_address")
+
+            multicalls.append(
+                module.functions.whitelistToken(
+                    underlying_address,
+                    "Underlying token for Hypercore deposit approve",
+                )
+            )
+
+        multicalls.append(
             module.functions.whitelistCoreWriter(
                 Web3.to_checksum_address(CORE_WRITER_ADDRESS),
                 Web3.to_checksum_address(cdw_address),
                 "Hypercore vault trading",
-            ),
-        ]
-
-        for idx, hv_address in enumerate(hypercore_vaults, start=1):
-            logger.info("Whitelisting Hypercore vault #%d: %s", idx, hv_address)
-            multicalls.append(
-                module.functions.whitelistHypercoreVault(
-                    Web3.to_checksum_address(hv_address),
-                    f"Hypercore vault: {hv_address}",
-                )
             )
+        )
+
+        if hypercore_vaults:
+            for idx, hv_address in enumerate(hypercore_vaults, start=1):
+                logger.info("Whitelisting Hypercore vault #%d: %s", idx, hv_address)
+                multicalls.append(
+                    module.functions.whitelistHypercoreVault(
+                        Web3.to_checksum_address(hv_address),
+                        f"Hypercore vault: {hv_address}",
+                    )
+                )
+        else:
+            logger.info("No explicit Hypercore vault list supplied; any_asset mode will allow any Hypercore vault address")
 
         call = module.functions.multicall(encode_multicalls(multicalls))
         tx_hash = _broadcast(call)
         assert_transaction_success_with_explanation(web3, tx_hash)
 
         entries.append(WhitelistEntry("Hypercore", "CoreWriter", CORE_WRITER_ADDRESS))
-        for hv_address in hypercore_vaults:
+        entries.append(WhitelistEntry("Hypercore", "CoreDepositWallet", cdw_address))
+        for hv_address in hypercore_vaults or []:
             entries.append(WhitelistEntry("Hypercore vault", str(hv_address), hv_address))
 
-        logger.info("Hypercore whitelisting complete: %d vault(s)", len(hypercore_vaults))
+        logger.info("Hypercore whitelisting complete: %d vault(s)", len(hypercore_vaults or []))
     else:
         logger.info("Not whitelisted: Hypercore")
 
