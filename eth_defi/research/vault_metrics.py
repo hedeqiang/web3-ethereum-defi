@@ -937,9 +937,11 @@ def calculate_period_metrics(
     cagr_gross = min(cagr_gross, max_cagr)
     cagr_net = min(cagr_net, max_cagr)
 
-    # Calculate daily returns for volatility and max drawdown
-    # Filter to only numeric values, drop NaN and infinite values
-    daily_returns = period_samples_daily.pct_change(fill_method=None).dropna()
+    # Calculate daily returns for volatility.
+    # Drop NaN prices first so pct_change works across sparse data
+    # (e.g. Hyperliquid weekly snapshots resampled to daily produce NaN gaps).
+    daily_prices_clean = period_samples_daily.dropna()
+    daily_returns = daily_prices_clean.pct_change(fill_method=None).dropna()
     # Ensure numeric dtype and filter out inf values to avoid std() errors
     daily_returns = pd.to_numeric(daily_returns, errors="coerce")
     daily_returns = daily_returns[np.isfinite(daily_returns)].dropna()
@@ -963,13 +965,17 @@ def calculate_period_metrics(
     if not np.isfinite(sharpe):
         sharpe = 0
 
-    # Calculate max drawdown
-    if len(daily_returns) >= 2:
+    # Calculate max drawdown directly from share prices.
+    # Using share prices (not daily returns) is robust for sparse data
+    # such as Hyperliquid vaults with weekly snapshots, where
+    # resample("D").last() produces NaN gaps that destroy daily returns
+    # via pct_change(fill_method=None).
+    period_prices = period_samples_daily.dropna()
+    if len(period_prices) >= 2:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            wealth = (1 + daily_returns).cumprod()
-            running_max = wealth.cummax()
-            drawdown = (wealth - running_max) / running_max
+            running_max = period_prices.cummax()
+            drawdown = (period_prices - running_max) / running_max
             max_drawdown = drawdown.min()  # Most negative value
             if not np.isfinite(max_drawdown):
                 max_drawdown = 0
