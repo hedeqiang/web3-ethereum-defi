@@ -186,6 +186,22 @@ def is_account_activated(
     return exists
 
 
+def _assert_activation_guard_config(
+    lagoon_vault: "LagoonVault",
+    core_deposit_wallet_address: HexAddress | str,
+) -> None:
+    """Preflight-check Lagoon guard permissions required for Hypercore activation."""
+    module = lagoon_vault.trading_strategy_module
+    safe_address = Web3.to_checksum_address(lagoon_vault.safe_address)
+    core_deposit_wallet_address = Web3.to_checksum_address(core_deposit_wallet_address)
+
+    if not module.functions.isAllowedApprovalDestination(core_deposit_wallet_address).call():
+        raise RuntimeError(f"TradingStrategyModuleV0 {module.address} does not allow approving CoreDepositWallet {core_deposit_wallet_address}. Hypercore activation requires whitelistCoreWriter() to be configured on the guard. On HyperEVM deployments this should be enabled whenever Hypercore trading is intended, including anyAsset mode.")
+
+    if not module.functions.isAllowedReceiver(safe_address).call():
+        raise RuntimeError(f"TradingStrategyModuleV0 {module.address} does not allow Safe {safe_address} as a receiver. Hypercore activation via depositFor() requires the Safe to be whitelisted as an allowed receiver.")
+
+
 def activate_account(
     web3: Web3,
     lagoon_vault: LagoonVault,
@@ -217,8 +233,8 @@ def activate_account(
     .. warning::
 
         The Safe must hold sufficient EVM USDC for the activation amount.
-        The guard must have ``depositFor`` whitelisted via
-        ``whitelistCoreWriter()`` (included since guard v0.x).
+        The guard must whitelist the CoreDepositWallet approval destination
+        and ``depositFor`` target via ``whitelistCoreWriter()``.
 
     Example::
 
@@ -288,6 +304,7 @@ def activate_account(
     usdc_contract = get_deployed_contract(web3, "centre/ERC20.json", asset_address)
     cdw_address = CORE_DEPOSIT_WALLET[chain_id]
     core_deposit_wallet = get_core_deposit_wallet_contract(web3, cdw_address)
+    _assert_activation_guard_config(lagoon_vault, cdw_address)
 
     # Step 1: Approve USDC to CoreDepositWallet via trading strategy module
     approve_fn = lagoon_vault.transact_via_trading_strategy_module(
