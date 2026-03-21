@@ -202,7 +202,16 @@ def main():
         base_path / "vault-metadata-db.pickle",
         base_path / "vault-reader-state-1h.pickle",
     ]
-    print("Exporting data files to R2")
+    print(f"\nExporting data files to R2")
+    print(f"  Bucket: {bucket_name}")
+    print(f"  Endpoint: {endpoint_url}")
+    print(f"  Public URL: {public_url}")
+    print(f"  Key prefix: '{upload_prefix}'" if upload_prefix else "  Key prefix: (none)")
+    print(f"  Files: {len(paths)}")
+    for p in paths:
+        exists = p.exists()
+        size = f"{p.stat().st_size / 1024 / 1024:.1f} MB" if exists else "MISSING"
+        print(f"    - {p.name}: {size}")
     upload_files_to_r2(
         file_paths=paths,
         bucket_name=bucket_name,
