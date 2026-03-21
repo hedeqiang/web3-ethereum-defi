@@ -82,6 +82,7 @@ Environment variables:
     - CHAIN_ORDER: Comma-separated list of chain names to scan in order (whitespace allowed, chains not listed are skipped)
     - DISABLE_CHAINS: Comma-separated list of chain names to skip (whitespace allowed)
     - SKIP_POST_PROCESSING: "true" to skip post-processing steps (default: "false")
+    - SKIP_CLEANING: "true" to skip price cleaning step (default: "false")
     - SKIP_SPARKLINES: "true" to skip sparkline image export to R2 (default: "false")
     - SKIP_METADATA: "true" to skip protocol/stablecoin metadata export to R2 (default: "false")
     - SKIP_DATA: "true" to skip data file (parquet, pickle) export to R2 (default: "false")
@@ -665,6 +666,7 @@ def main():
     max_workers = int(os.environ.get("MAX_WORKERS", "50"))
     frequency = os.environ.get("FREQUENCY", "1h")
     skip_post_processing = os.environ.get("SKIP_POST_PROCESSING", "false").lower() == "true"
+    skip_cleaning = os.environ.get("SKIP_CLEANING", "false").lower() == "true"
     skip_sparklines = os.environ.get("SKIP_SPARKLINES", "false").lower() == "true"
     skip_metadata = os.environ.get("SKIP_METADATA", "false").lower() == "true"
     skip_data = os.environ.get("SKIP_DATA", "false").lower() == "true"
@@ -683,6 +685,8 @@ def main():
     logger.info("SCAN_PRICES: %s, SCAN_HYPERCORE: %s, SCAN_GRVT: %s, SCAN_LIGHTER: %s, RETRY_COUNT: %d, MAX_WORKERS: %d, FREQUENCY: %s", scan_prices, scan_hypercore, scan_grvt, scan_lighter, retry_count, max_workers, frequency)
     if skip_post_processing:
         logger.info("SKIP_POST_PROCESSING: true - post-processing will be skipped")
+    if skip_cleaning:
+        logger.info("SKIP_CLEANING: true - price cleaning will be skipped")
     if skip_sparklines:
         logger.info("SKIP_SPARKLINES: true - sparkline export will be skipped")
     if skip_metadata:
@@ -929,7 +933,7 @@ def main():
         logger.info("All chain scans complete, starting post-processing")
         logger.info("=" * 80)
 
-        post_results = run_post_processing(scan_hypercore=scan_hypercore, scan_grvt=scan_grvt, scan_lighter=scan_lighter, skip_sparklines=skip_sparklines, skip_metadata=skip_metadata, skip_data=skip_data)
+        post_results = run_post_processing(scan_hypercore=scan_hypercore, scan_grvt=scan_grvt, scan_lighter=scan_lighter, skip_cleaning=skip_cleaning, skip_sparklines=skip_sparklines, skip_metadata=skip_metadata, skip_data=skip_data)
         for step, success in post_results.items():
             status_str = "SUCCESS" if success else "FAILED"
             logger.info("Post-processing %s: %s", step, status_str)
