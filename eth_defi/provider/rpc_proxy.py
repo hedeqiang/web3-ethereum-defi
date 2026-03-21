@@ -189,6 +189,13 @@ class RPCProxyConfig:
     #: flooding log files.
     log_max_size: int = 2048
 
+    #: Maximum number of connections per host in the HTTP pool.
+    #:
+    #: Anvil can issue many concurrent requests during genesis fork
+    #: creation, so a larger pool avoids ``Connection pool is full,
+    #: discarding connection`` warnings from urllib3.
+    pool_maxsize: int = 50
+
     #: Maximum number of error replies stored per provider in
     #: :py:attr:`UpstreamRPCProviderStatistics.error_replies`.
     #:
@@ -802,9 +809,11 @@ def start_rpc_proxy(
     # Port allocation is deferred to the OS bind() call below when port
     # is None, to avoid TOCTOU races under parallel test execution.
 
-    # Create HTTP session with connection pooling
+    # Create HTTP session with connection pooling.
+    # Use a generous pool_maxsize because Anvil can issue many concurrent
+    # requests during genesis fork creation.
     session = requests.Session()
-    adapter = HTTPAdapter(pool_connections=len(rpc_urls), pool_maxsize=10)
+    adapter = HTTPAdapter(pool_connections=len(rpc_urls), pool_maxsize=config.pool_maxsize)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
 
