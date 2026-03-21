@@ -128,7 +128,7 @@ def export_sparklines() -> bool:
 
 
 def export_protocol_metadata() -> bool:
-    """Export protocol metadata and database files to R2.
+    """Export protocol/stablecoin metadata and logos to R2.
 
     :return: True if export succeeded
     """
@@ -145,22 +145,47 @@ def export_protocol_metadata() -> bool:
         return False
 
 
+def export_data_files() -> bool:
+    """Export database files (parquet, pickle) to R2.
+
+    :return: True if export succeeded
+    """
+    try:
+        logger.info("Exporting data files")
+        spec = importlib.util.spec_from_file_location("export_data_files", "scripts/erc-4626/export-data-files.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        module.main()
+        logger.info("Data file export complete")
+        return True
+    except Exception:
+        logger.exception("Export data files failed")
+        return False
+
+
 def run_post_processing(
     scan_hypercore: bool = False,
     scan_grvt: bool = False,
     scan_lighter: bool = False,
+    skip_sparklines: bool = False,
+    skip_metadata: bool = False,
+    skip_data: bool = False,
 ) -> dict[str, bool]:
     """Run full post-processing pipeline after chain scans complete.
 
     Steps:
     1. Merge native protocol data into uncleaned parquet
     2. Clean prices
-    3. Export sparklines
-    4. Export protocol metadata and database files to R2
+    3. Export sparklines to R2
+    4. Export protocol metadata to R2
+    5. Export data files (parquet, pickle) to R2
 
     :param scan_hypercore: Whether to merge Hypercore data
     :param scan_grvt: Whether to merge GRVT data
     :param scan_lighter: Whether to merge Lighter data
+    :param skip_sparklines: Skip sparkline image export to R2
+    :param skip_metadata: Skip protocol/stablecoin metadata export to R2
+    :param skip_data: Skip data file (parquet, pickle) export to R2
     :return: Dictionary mapping step name to success boolean
     """
     steps = {}
@@ -177,9 +202,21 @@ def run_post_processing(
     steps["clean-prices"] = clean_prices()
 
     # Step 3: Export sparklines
-    steps["export-sparklines"] = export_sparklines()
+    if skip_sparklines:
+        logger.info("Skipping sparkline export (SKIP_SPARKLINES=true)")
+    else:
+        steps["export-sparklines"] = export_sparklines()
 
     # Step 4: Export protocol metadata
-    steps["export-protocol-metadata"] = export_protocol_metadata()
+    if skip_metadata:
+        logger.info("Skipping metadata export (SKIP_METADATA=true)")
+    else:
+        steps["export-protocol-metadata"] = export_protocol_metadata()
+
+    # Step 5: Export data files
+    if skip_data:
+        logger.info("Skipping data file export (SKIP_DATA=true)")
+    else:
+        steps["export-data-files"] = export_data_files()
 
     return steps
