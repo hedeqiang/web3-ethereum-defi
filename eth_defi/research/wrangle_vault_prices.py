@@ -62,7 +62,9 @@ VAULT_STATE_COLUMNS = {
     "follower_count": float("nan"),
     "account_pnl": float("nan"),
     "cumulative_volume": float("nan"),
-    "deposit_closed_reason": None,
+    # PyArrow does not accept None for string columns,
+    # use empty string as the default for deposit_closed_reason
+    "deposit_closed_reason": "",
 }
 
 
@@ -94,14 +96,19 @@ def derive_deposit_closed_reason(prices_df: pd.DataFrame) -> pd.DataFrame:
         DataFrame with ``deposit_closed_reason`` filled in for both vault types.
     """
     if "deposit_closed_reason" not in prices_df.columns:
-        prices_df["deposit_closed_reason"] = None
+        # PyArrow does not accept None for string columns, use empty string
+        prices_df["deposit_closed_reason"] = ""
+    else:
+        # Ensure compatible dtype: convert None/NaN to empty string
+        # because PyArrow string columns do not accept null assignment via .loc
+        prices_df["deposit_closed_reason"] = prices_df["deposit_closed_reason"].astype(object).fillna("").astype(str)
 
     if "deposits_open" not in prices_df.columns:
         return prices_df
 
     # Fill in reason for ERC-4626 rows where deposits_open == "false"
     # but deposit_closed_reason is not yet set (Hyperliquid rows already have it).
-    mask = (prices_df["deposit_closed_reason"].isna()) & (prices_df["deposits_open"] == "false")
+    mask = (prices_df["deposit_closed_reason"] == "") & (prices_df["deposits_open"] == "false")
     prices_df.loc[mask, "deposit_closed_reason"] = "Vault deposits disabled"
 
     return prices_df
@@ -781,7 +788,7 @@ def sort_and_index_vault_prices(
       as the pipeline takes several minutes to run
     """
 
-    assert isinstance(prices_df.index, pd.DatetimeIndex), f"Got: {type(prices_df.index)}"
+    assert isinstance(prices_df.index, pd.DatetimeIndex) or pd.api.types.is_datetime64_any_dtype(prices_df.index), f"Expected datetime index, got: {type(prices_df.index)}, dtype: {prices_df.index.dtype}"
 
     # Create a priority column for sorting
     priority_set = set(priority_ids)
@@ -991,7 +998,7 @@ def generate_cleaned_vault_datasets(
     vault_db: VaultDatabase = pickle.load(vault_db_path.open("rb"))
 
     logger(f"Loading prices {price_df_path}")
-    prices_df = pd.read_parquet(price_df_path)
+    prices_df = pd.read_parquet(price_df_path, dtype_backend="pyarrow")
 
     logger(f"We have {vault_db.get_lead_count():,} vault leads in the vault database and {len(prices_df):,} price rows in the raw prices DataFrame")
 

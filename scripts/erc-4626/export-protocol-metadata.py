@@ -101,7 +101,7 @@ def upload_files_to_r2(
 
         if public_url:
             final_url = f"{public_url.rstrip('/')}/{s3_key}"
-            logger.info("Uploaded: %s", final_url)
+            print(f"  -> {final_url}")
 
     return len(files_to_upload)
 
