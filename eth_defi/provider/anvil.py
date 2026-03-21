@@ -147,7 +147,7 @@ CLI_FLAGS = {
 }
 
 
-def _launch(cmd: str, **kwargs) -> tuple[psutil.Popen, list[str]]:
+def _launch(cmd: str, inherit_stdio: bool = False, **kwargs) -> tuple[psutil.Popen, list[str]]:
     """Launches the RPC client.
 
     Args:
@@ -179,7 +179,10 @@ def _launch(cmd: str, **kwargs) -> tuple[psutil.Popen, list[str]]:
 
     final_cmd_str = " ".join(cmd_list)
     logger.info("Launching anvil: %s", final_cmd_str)
-    out = DEVNULL if sys.platform == "win32" else PIPE
+    if inherit_stdio:
+        out = None
+    else:
+        out = DEVNULL if sys.platform == "win32" else PIPE
     env = os.environ.copy()
     env["RUST_BACKTRACE"] = "1"  # Get tracebacks from crashed anvil
     return psutil.Popen(cmd_list, stdin=DEVNULL, stdout=out, stderr=out, env=env), cmd_list
@@ -530,6 +533,7 @@ def launch_anvil(
     code_size_limit: int = None,
     rpc_smoke_test=True,
     verbose=False,
+    inherit_stdio: bool = False,
     archive: bool = True,
     proxy_multiple_upstream: "RPCProxy | RPCProxyConfig | bool" = True,
 ) -> AnvilLaunch:
@@ -720,6 +724,19 @@ def launch_anvil(
         Make Anvil the proces to dump a lot of stuff to stdout/stderr.
 
         See -vvvv https://getfoundry.sh/anvil/reference/anvil
+
+    :param inherit_stdio:
+        If ``True``, let the Anvil subprocess inherit the parent process
+        stdout/stderr instead of capturing them in pipes.
+
+        This is useful in Docker and other supervised environments where you
+        want Anvil logs to appear live in the container logs.
+
+        .. warning ::
+
+            When ``False`` (default), stdout/stderr are captured and only read
+            when the process is shut down. If Anvil is very chatty, those pipe
+            buffers can fill up and stall the subprocess.
 
     :param archive:
         Check that the RPC endpoint provides archive node access.
@@ -922,6 +939,7 @@ def launch_anvil(
     while attempts_left > 0:
         process, final_cmd = _launch(
             cmd,
+            inherit_stdio=inherit_stdio,
             **args,
         )
 
