@@ -401,11 +401,6 @@ class _ProxyRequestHandler(BaseHTTPRequestHandler):
         except (orjson.JSONDecodeError, ValueError):
             pass
 
-        # Optional request payload logging
-        if logger.isEnabledFor(self.server.config.request_log_level):
-            payload_str = _truncate_payload(body, self.server.config.log_max_size)
-            logger.log(self.server.config.request_log_level, "-> [%s]: %s", method, payload_str)
-
         # Try upstream providers with failover
         last_error = None
         last_status = None
@@ -422,22 +417,30 @@ class _ProxyRequestHandler(BaseHTTPRequestHandler):
             stats = self.server.provider_stats[provider_key]
             stats.record_request(method)
 
+            # Optional request payload logging
+            if logger.isEnabledFor(self.server.config.request_log_level):
+                payload_str = _truncate_payload(body, self.server.config.log_max_size)
+                logger.log(self.server.config.request_log_level, "-> [%s] to %s: %s", method, provider_key, payload_str)
+
+            t0 = time.time()
             try:
                 resp = self._try_upstream(provider_url, body, self.server.config.timeout)
                 status_code = resp.status_code
                 response_body = resp.content
             except (ConnectionError, Timeout, OSError) as e:
                 # Connection-level failure — always retry
+                duration = time.time() - t0
                 error_msg = f"{e.__class__.__name__}: {e}"
                 stats.record_failure(method, error_msg, http_status=None, max_error_replies=self.server.config.max_error_replies)
                 total_requests = sum(s.request_count for s in self.server.provider_stats.values())
                 logger.log(
                     self.server.config.switchover_log_level,
-                    "RPC proxy %r: upstream %s connection error for %s: %s (attempt %d/%d, %d total requests)",
+                    "RPC proxy %r: upstream %s connection error for %s: %s (%.3fs, attempt %d/%d, %d total requests)",
                     self.server.proxy_name,
                     provider_key,
                     method,
                     e.__class__.__name__,
+                    duration,
                     attempt + 1,
                     self.server.config.retries,
                     total_requests,
@@ -456,10 +459,12 @@ class _ProxyRequestHandler(BaseHTTPRequestHandler):
             except (orjson.JSONDecodeError, ValueError):
                 pass
 
+            duration = time.time() - t0
+
             # Optional response payload logging
             if logger.isEnabledFor(self.server.config.request_log_level):
                 payload_str = _truncate_payload(response_body, self.server.config.log_max_size)
-                logger.log(self.server.config.request_log_level, "<- [%s] from %s (HTTP %d): %s", method, provider_key, status_code, payload_str)
+                logger.log(self.server.config.request_log_level, "<- [%s] from %s (HTTP %d, %.3fs): %s", method, provider_key, status_code, duration, payload_str)
 
             # Check if the response indicates a retryable failure
             if self.server.config.failure_handler(status_code, parsed_response):
