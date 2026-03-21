@@ -9,7 +9,7 @@ to also show low TVL vaults. Only high TVL freshness affects the exit code.
 
 Computes the absolute last timestamp and the median last timestamp
 (excluding outliers via IQR). Exits with code 1 if the high TVL median
-age exceeds 24 hours (configurable via MAX_AGE_HOURS).
+age exceeds 36 hours (configurable via MAX_AGE_HOURS).
 
 Usage:
 
@@ -24,7 +24,7 @@ Usage:
 Environment variables:
 
 - ``PARQUET_URL``: URL to load parquet from. Default: local file.
-- ``MAX_AGE_HOURS``: Maximum allowed age in hours (default: 24)
+- ``MAX_AGE_HOURS``: Maximum allowed age in hours (default: 36)
 - ``TVL_THRESHOLD``: TVL boundary between low and high in USD (default: 20000)
 - ``SHOW_LOW_TVL``: Set to ``true`` to also show low TVL vault table (default: false)
 - ``SHOW_UNCLEANED``: Set to ``true`` to also show uncleaned price data freshness (default: false)
@@ -101,7 +101,7 @@ def _build_chain_table(latest_per_vault: pd.Series, now: pd.Timestamp) -> list[l
 
 
 def main():
-    max_age_hours = int(os.environ.get("MAX_AGE_HOURS", "24"))
+    max_age_hours = int(os.environ.get("MAX_AGE_HOURS", "36"))
     tvl_threshold = float(os.environ.get("TVL_THRESHOLD", "20000"))
     show_low_tvl = os.environ.get("SHOW_LOW_TVL", "false").lower() == "true"
     show_uncleaned = os.environ.get("SHOW_UNCLEANED", "false").lower() == "true"
