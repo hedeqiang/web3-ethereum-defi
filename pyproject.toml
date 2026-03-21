@@ -205,6 +205,16 @@ filterwarnings = [
   # eth-retry 0.3.7 and cached-property 2.0.1 (both at latest versions)
   "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:eth_retry.*:",
   "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning:cached_property.*:",
+  # websockets.legacy deprecated since v14.0; web3.py still uses it and
+  # constrains websockets <16.0.0, so we cannot upgrade past this
+  "ignore::DeprecationWarning:websockets.*:",
+  # google-auth load_credentials_from_dict deprecation (transitive dep)
+  "ignore::DeprecationWarning:google.auth.*:",
+  # web3-google-hsm uses Pydantic V2 class-based Config; only version 0.1.0
+  # exists and upstream needs to migrate to ConfigDict
+  "ignore::DeprecationWarning:web3_google_hsm.*:",
+  # Unclosed sockets/databases from cffi and web3 internals during test teardown
+  "ignore::ResourceWarning",
 ]
 
 [tool.ruff]
