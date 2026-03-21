@@ -23,8 +23,12 @@ Usage:
     MERGE_HYPERCORE=true MERGE_GRVT=true MERGE_LIGHTER=true \
     poetry run python scripts/erc-4626/post-process-prices.py
 
-    # Only merge and clean, skip R2 upload
-    SKIP_EXPORT=true poetry run python scripts/erc-4626/post-process-prices.py
+    # Only merge and clean, skip all R2 uploads
+    SKIP_SPARKLINES=true SKIP_METADATA=true SKIP_DATA=true \
+    poetry run python scripts/erc-4626/post-process-prices.py
+
+    # Skip only data file upload
+    SKIP_DATA=true poetry run python scripts/erc-4626/post-process-prices.py
 
     # Test upload (prefixes uploaded filenames with "test-")
     source .local-test.env && \
@@ -32,12 +36,40 @@ Usage:
 
 Environment variables:
 
-- ``MERGE_HYPERCORE``: Merge Hyperliquid native vault data (default: false)
-- ``MERGE_GRVT``: Merge GRVT native vault data (default: false)
-- ``MERGE_LIGHTER``: Merge Lighter native pool data (default: false)
-- ``SKIP_EXPORT``: Skip sparkline and metadata export to R2 (default: false)
-- ``UPLOAD_PREFIX``: Prefix for uploaded data file keys, e.g. ``test-`` (default: "")
-- ``LOG_LEVEL``: Logging level (default: info)
+Pipeline control:
+
+- ``LOG_LEVEL``: Logging level (default: ``info``)
+- ``MERGE_HYPERCORE``: Merge Hyperliquid native vault data (default: ``false``)
+- ``MERGE_GRVT``: Merge GRVT native vault data (default: ``false``)
+- ``MERGE_LIGHTER``: Merge Lighter native pool data (default: ``false``)
+- ``SKIP_SPARKLINES``: Skip sparkline image export to R2 (default: ``false``)
+- ``SKIP_METADATA``: Skip protocol/stablecoin metadata export to R2 (default: ``false``)
+- ``SKIP_DATA``: Skip data file (parquet, pickle) export to R2 (default: ``false``)
+- ``UPLOAD_PREFIX``: Prefix for uploaded data file keys, e.g. ``test-`` (default: ``""``)
+- ``MAX_WORKERS``: Number of parallel workers for rendering/uploading (default: ``20``)
+
+Sparkline R2 bucket (required unless ``SKIP_SPARKLINES=true``):
+
+- ``R2_SPARKLINE_BUCKET_NAME``: R2 bucket for sparkline images
+- ``R2_SPARKLINE_ACCESS_KEY_ID``: R2 access key ID for sparkline bucket
+- ``R2_SPARKLINE_SECRET_ACCESS_KEY``: R2 secret access key for sparkline bucket
+- ``R2_SPARKLINE_ENDPOINT_URL``: R2 endpoint URL for sparkline bucket
+
+Protocol metadata R2 bucket (required unless ``SKIP_METADATA=true``):
+
+- ``R2_VAULT_METADATA_BUCKET_NAME``: R2 bucket for protocol/stablecoin metadata and logos
+- ``R2_VAULT_METADATA_ACCESS_KEY_ID``: R2 access key ID for metadata bucket
+- ``R2_VAULT_METADATA_SECRET_ACCESS_KEY``: R2 secret access key for metadata bucket
+- ``R2_VAULT_METADATA_ENDPOINT_URL``: R2 endpoint URL for metadata bucket
+- ``R2_VAULT_METADATA_PUBLIC_URL``: Public base URL for logo URLs in metadata
+
+Data files R2 bucket (falls back to ``R2_VAULT_METADATA_*`` if not set):
+
+- ``R2_DATA_BUCKET_NAME``: R2 bucket for parquet/pickle data files
+- ``R2_DATA_ACCESS_KEY_ID``: R2 access key ID for data bucket
+- ``R2_DATA_SECRET_ACCESS_KEY``: R2 secret access key for data bucket
+- ``R2_DATA_ENDPOINT_URL``: R2 endpoint URL for data bucket
+- ``R2_DATA_PUBLIC_URL``: Public base URL for data files
 """
 
 import logging
@@ -49,6 +81,7 @@ from tabulate import tabulate
 from eth_defi.utils import setup_console_logging
 from eth_defi.vault.post_processing import (
     clean_prices,
+    export_data_files,
     export_protocol_metadata,
     export_sparklines,
     merge_native_protocols,
@@ -65,7 +98,9 @@ def main():
     merge_hypercore = os.environ.get("MERGE_HYPERCORE", "false").lower() == "true"
     merge_grvt = os.environ.get("MERGE_GRVT", "false").lower() == "true"
     merge_lighter = os.environ.get("MERGE_LIGHTER", "false").lower() == "true"
-    skip_export = os.environ.get("SKIP_EXPORT", "false").lower() == "true"
+    skip_sparklines = os.environ.get("SKIP_SPARKLINES", "false").lower() == "true"
+    skip_metadata = os.environ.get("SKIP_METADATA", "false").lower() == "true"
+    skip_data = os.environ.get("SKIP_DATA", "false").lower() == "true"
 
     steps = {}
 
@@ -84,15 +119,26 @@ def main():
     logger.info("Step 2: Cleaning prices")
     steps["clean-prices"] = clean_prices()
 
-    # Step 3: Export to R2
-    if skip_export:
-        logger.info("Step 3: Skipping export (SKIP_EXPORT=true)")
+    # Step 3: Export sparklines to R2
+    if skip_sparklines:
+        logger.info("Step 3: Skipping sparkline export (SKIP_SPARKLINES=true)")
     else:
-        logger.info("Step 3a: Exporting sparklines")
+        logger.info("Step 3: Exporting sparklines")
         steps["export-sparklines"] = export_sparklines()
 
-        logger.info("Step 3b: Exporting protocol metadata and database files")
+    # Step 4: Export protocol metadata to R2
+    if skip_metadata:
+        logger.info("Step 4: Skipping metadata export (SKIP_METADATA=true)")
+    else:
+        logger.info("Step 4: Exporting protocol metadata")
         steps["export-protocol-metadata"] = export_protocol_metadata()
+
+    # Step 5: Export data files to R2
+    if skip_data:
+        logger.info("Step 5: Skipping data file export (SKIP_DATA=true)")
+    else:
+        logger.info("Step 5: Exporting data files")
+        steps["export-data-files"] = export_data_files()
 
     # Summary
     rows = []

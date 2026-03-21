@@ -10,20 +10,18 @@ Example:
     source .local-test.env && poetry run python scripts/erc-4626/export-protocol-metadata.py
 
 Environment variables:
-    - R2_VAULT_METADATA_BUCKET_NAME: R2 bucket name (required)
-    - R2_VAULT_METADATA_ACCESS_KEY_ID: R2 access key ID (required)
-    - R2_VAULT_METADATA_SECRET_ACCESS_KEY: R2 secret access key (required)
-    - R2_VAULT_METADATA_ENDPOINT_URL: R2 API endpoint URL (required)
+    - R2_VAULT_METADATA_BUCKET_NAME: R2 bucket for protocol/stablecoin metadata and logos (required)
+    - R2_VAULT_METADATA_ACCESS_KEY_ID: R2 access key ID for metadata bucket (required)
+    - R2_VAULT_METADATA_SECRET_ACCESS_KEY: R2 secret access key for metadata bucket (required)
+    - R2_VAULT_METADATA_ENDPOINT_URL: R2 API endpoint URL for metadata bucket (required)
     - R2_VAULT_METADATA_PUBLIC_URL: Public base URL for logo URLs in metadata (required)
     - MAX_WORKERS: Number of parallel upload workers (default: 20)
-    - UPLOAD_PREFIX: Prefix for uploaded data file keys, e.g. "test-" (default: "")
 """
 
 import logging
 import os
 from pathlib import Path
 
-import boto3
 from joblib import Parallel, delayed
 from tabulate import tabulate
 from tqdm_loggable.auto import tqdm
@@ -33,77 +31,6 @@ from eth_defi.utils import setup_console_logging
 from eth_defi.vault.protocol_metadata import METADATA_DIR, get_available_logos, process_and_upload_protocol_metadata
 
 logger = logging.getLogger(__name__)
-
-
-def upload_files_to_r2(
-    file_paths: list[Path],
-    bucket_name: str,
-    endpoint_url: str,
-    access_key_id: str,
-    secret_access_key: str,
-    folder="vault-protocol-metadata",
-    key_prefix: str = "",
-    public_url: str = "",
-) -> int:
-    """Upload a list of files to R2 bucket, excluding tmp* files.
-
-    :param file_paths: List of file paths to upload
-    :param bucket_name: R2 bucket name
-    :param endpoint_url: R2 API endpoint URL
-    :param access_key_id: R2 access key ID
-    :param secret_access_key: R2 secret access key
-    :param folder: Folder name in R2 bucket to upload files to
-    :param key_prefix: Prefix for S3 keys (e.g. ``test-`` for test uploads)
-    :param public_url: Public base URL for logging final download URLs
-    :return: Number of files uploaded
-    """
-    # Filter out tmp* files and files that don't exist
-    files_to_upload = []
-    for f in file_paths:
-        if f.name.startswith("tmp"):
-            continue
-        if not f.exists():
-            logger.warning("File does not exist, skipping: %s", f)
-            continue
-        files_to_upload.append(f)
-
-    if not files_to_upload:
-        logger.info("No files to upload after filtering")
-        return 0
-
-    logger.info("Uploading %d files to R2 bucket %s (excluded %d files)", len(files_to_upload), bucket_name, len(file_paths) - len(files_to_upload))
-
-    s3_client = boto3.client(
-        "s3",
-        endpoint_url=endpoint_url,
-        aws_access_key_id=access_key_id,
-        aws_secret_access_key=secret_access_key,
-    )
-
-    for file_path in files_to_upload:
-        s3_key = f"{key_prefix}{file_path.name}"
-        file_size = file_path.stat().st_size
-
-        logger.info("Uploading %s to s3://%s/%s", file_path, bucket_name, s3_key)
-
-        with open(file_path, "rb") as f:
-            with tqdm(total=file_size, unit="B", unit_scale=True, desc=f"Uploading {s3_key}") as pbar:
-
-                def upload_callback(bytes_amount):
-                    pbar.update(bytes_amount)
-
-                s3_client.upload_fileobj(
-                    f,
-                    bucket_name,
-                    s3_key,
-                    Callback=upload_callback,
-                )
-
-        if public_url:
-            final_url = f"{public_url.rstrip('/')}/{s3_key}"
-            print(f"  -> {final_url}")
-
-    return len(files_to_upload)
 
 
 def main():
@@ -119,13 +46,9 @@ def main():
     endpoint_url = os.environ.get("R2_VAULT_METADATA_ENDPOINT_URL")
     public_url = os.environ.get("R2_VAULT_METADATA_PUBLIC_URL")
     max_workers = int(os.environ.get("MAX_WORKERS", "20"))
-    upload_prefix = os.environ.get("UPLOAD_PREFIX", "")
 
     assert bucket_name, "R2_VAULT_METADATA_BUCKET_NAME environment variable is required"
     assert public_url, "R2_VAULT_METADATA_PUBLIC_URL environment variable is required"
-
-    if upload_prefix:
-        logger.info("Using upload prefix: %s", upload_prefix)
 
     yaml_files = list(METADATA_DIR.glob("*.yaml"))
     slugs = [f.stem for f in yaml_files]
@@ -192,35 +115,6 @@ def main():
     )
 
     print(f"\nStablecoin metadata export complete: {len(stablecoin_files)} stablecoins, {len(index)} index entries\n")
-
-    # Put database files on R2 as well.
-    # These can be read by the backtester.
-    base_path = Path("~/.tradingstrategy/vaults/").expanduser()
-    paths = [
-        base_path / "vault-prices-1h.parquet",
-        base_path / "cleaned-vault-prices-1h.parquet",
-        base_path / "vault-metadata-db.pickle",
-        base_path / "vault-reader-state-1h.pickle",
-    ]
-    print(f"\nExporting data files to R2")
-    print(f"  Bucket: {bucket_name}")
-    print(f"  Endpoint: {endpoint_url}")
-    print(f"  Public URL: {public_url}")
-    print(f"  Key prefix: '{upload_prefix}'" if upload_prefix else "  Key prefix: (none)")
-    print(f"  Files: {len(paths)}")
-    for p in paths:
-        exists = p.exists()
-        size = f"{p.stat().st_size / 1024 / 1024:.1f} MB" if exists else "MISSING"
-        print(f"    - {p.name}: {size}")
-    upload_files_to_r2(
-        file_paths=paths,
-        bucket_name=bucket_name,
-        endpoint_url=endpoint_url,
-        access_key_id=access_key_id,
-        secret_access_key=secret_access_key,
-        key_prefix=upload_prefix,
-        public_url=public_url,
-    )
 
 
 if __name__ == "__main__":
