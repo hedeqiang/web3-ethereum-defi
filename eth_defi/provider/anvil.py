@@ -49,7 +49,7 @@ from decimal import Decimal
 from functools import wraps
 from pathlib import Path
 from subprocess import DEVNULL, PIPE
-from typing import Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 import psutil
 import requests
@@ -58,6 +58,9 @@ from requests.exceptions import ConnectionError as RequestsConnectionError
 from web3 import HTTPProvider, Web3
 
 from eth_defi.utils import find_free_port, is_localhost_port_listening, shutdown_hard
+
+if TYPE_CHECKING:
+    from eth_defi.provider.rpc_proxy import RPCProxy, RPCProxyConfig
 
 logger = logging.getLogger(__name__)
 
@@ -235,8 +238,27 @@ class AnvilLaunch:
     #: UNIX process that we opened
     process: psutil.Popen
 
+    #: Optional JSON-RPC failover proxy sitting between Anvil and upstream RPCs.
+    #: Automatically started by :py:func:`launch_anvil` when multiple RPCs are
+    #: configured in space-separated ``fork_url`` and ``proxy_multiple_upstream``
+    #: is not ``False``.
+    #: See :py:mod:`eth_defi.provider.rpc_proxy`.
+    proxy: "RPCProxy | None" = None
+
+    #: Whether :py:meth:`close` should shut down the proxy.
+    #: ``True`` when the proxy was created by :py:func:`launch_anvil`;
+    #: ``False`` when the caller passed a pre-built
+    #: :py:class:`~eth_defi.provider.rpc_proxy.RPCProxy` instance
+    #: (caller is responsible for its lifecycle).
+    _proxy_managed: bool = True
+
     def close(self, log_level: Optional[int] = None, block=True, block_timeout=30) -> tuple[bytes, bytes]:
         """Close the background Anvil process.
+
+        If this instance owns the :py:class:`~eth_defi.provider.rpc_proxy.RPCProxy`
+        (i.e. it was auto-created, not passed in by the caller), the proxy
+        is shut down after Anvil exits and its per-provider statistics are
+        logged.
 
         :param log_level:
             Dump Anvil messages to logging
@@ -258,6 +280,8 @@ class AnvilLaunch:
             check_port=self.port,
         )
         logger.info("Anvil shutdown %s", self.json_rpc_url)
+        if self.proxy is not None and self._proxy_managed:
+            self.proxy.close()
         return stdout, stderr
 
 
@@ -507,6 +531,7 @@ def launch_anvil(
     rpc_smoke_test=True,
     verbose=False,
     archive: bool = True,
+    proxy_multiple_upstream: "RPCProxy | RPCProxyConfig | bool" = True,
 ) -> AnvilLaunch:
     """Creates Anvil unit test backend or mainnet fork.
 
@@ -704,6 +729,55 @@ def launch_anvil(
         If the RPC cannot access the requested block, raises :py:class:`ArchiveNodeRequired`
         with HTTP response headers to help identify the problematic RPC provider.
 
+    :param proxy_multiple_upstream:
+        Controls how multiple upstream RPC providers in ``fork_url`` are handled.
+
+        **Background:** Anvil accepts only a single ``--fork-url`` and has no
+        internal retry or failover logic. When the upstream is slow or
+        rate-limited, Anvil hangs indefinitely. This parameter enables a
+        transparent JSON-RPC proxy (:py:class:`~eth_defi.provider.rpc_proxy.RPCProxy`)
+        that sits between Anvil and multiple upstreams, providing automatic
+        failover, per-request timeouts, and diagnostics.
+
+        The proxy is only relevant when ``fork_url`` contains multiple
+        space-separated RPC URLs. With a single URL this parameter is ignored.
+
+        Accepted values:
+
+        - **``True``** (default) — automatically start a proxy with default
+          settings when multiple RPCs are detected.  The proxy lifecycle is
+          tied to :py:meth:`AnvilLaunch.close`: it starts before Anvil and
+          shuts down (logging per-provider statistics) after Anvil exits.
+
+        - **``False``** — disable the proxy entirely.  Falls back to the
+          legacy behaviour of picking one RPC in round-robin order per
+          ``launch_anvil()`` call, with no intra-session failover.
+
+        - **An :py:class:`~eth_defi.provider.rpc_proxy.RPCProxyConfig` instance** —
+          automatically start a proxy with custom settings.  Any fields not
+          set explicitly use their dataclass defaults.  Example::
+
+              from eth_defi.provider.rpc_proxy import RPCProxyConfig
+
+              launch_anvil(
+                  fork_url="https://rpc-a.example.com https://rpc-b.example.com",
+                  proxy_multiple_upstream=RPCProxyConfig(
+                      timeout=15.0,
+                      retries=5,
+                      auto_switch_request_count=50,
+                  ),
+              )
+
+        - **An :py:class:`~eth_defi.provider.rpc_proxy.RPCProxy` instance** —
+          use a proxy that you created yourself via
+          :py:func:`~eth_defi.provider.rpc_proxy.start_rpc_proxy`.  Useful when
+          you need full control over the proxy lifecycle or want to share a
+          single proxy across multiple Anvil instances.  In this case
+          ``launch_anvil`` does **not** manage the proxy lifecycle — you must
+          call :py:meth:`~eth_defi.provider.rpc_proxy.RPCProxy.close` yourself.
+
+        See :py:mod:`eth_defi.provider.rpc_proxy` for the full proxy API.
+
     :raises ArchiveNodeRequired:
         When ``archive=True`` and the RPC endpoint cannot access the requested
         historical block.
@@ -731,37 +805,75 @@ def launch_anvil(
 
     url = f"http://localhost:{port}"
 
+    proxy = None
+    available_rpcs = []
+    # Track whether we manage the proxy lifecycle (True) or the caller does (False)
+    proxy_managed = True
+
     if fork_url and " " in fork_url:
-        # Multi-RPC syntax: rotate through available endpoints across
-        # successive launch_anvil() calls to work around test flakiness on CI.
-        # Each call advances to the next RPC in round-robin order.
-        #
-        # Filter out mev+ prefixed endpoints (e.g. mev+https://sequencer.example.com)
-        # as these are MEV-protected sequencer endpoints that typically don't support
-        # standard RPC calls like eth_blockNumber needed by Anvil.
+        # Multi-RPC syntax: filter out mev+ prefixed endpoints
+        # (MEV-protected sequencer endpoints that don't support standard RPC calls).
         all_rpcs = [u for u in fork_url.split(" ") if u]
         available_rpcs = [u for u in all_rpcs if not u.startswith("mev+")]
         if not available_rpcs:
             # All endpoints are mev+, strip the prefix as a fallback
             available_rpcs = [u.replace("mev+", "", 1) for u in all_rpcs]
-        if not hasattr(_anvil_rpc_state, "rpc_index"):
-            _anvil_rpc_state.rpc_index = random.randint(0, len(available_rpcs) - 1)
+
+        if len(available_rpcs) > 1 and proxy_multiple_upstream is not False:
+            from eth_defi.provider.rpc_proxy import RPCProxy as RPCProxyClass
+            from eth_defi.provider.rpc_proxy import RPCProxyConfig as RPCProxyConfigClass
+            from eth_defi.provider.rpc_proxy import start_rpc_proxy
+
+            if isinstance(proxy_multiple_upstream, RPCProxyClass):
+                # Caller provided a pre-built proxy — use it, but don't
+                # manage its lifecycle (caller is responsible for close()).
+                proxy = proxy_multiple_upstream
+                proxy_managed = False
+                cleaned_fork_url = proxy.url
+                logger.info(
+                    "Using caller-provided RPC proxy at %s",
+                    proxy.url,
+                )
+            else:
+                # Start a failover proxy that sits between Anvil and multiple
+                # upstream RPCs, providing retry/timeout/switchover handling.
+                config = proxy_multiple_upstream if isinstance(proxy_multiple_upstream, RPCProxyConfigClass) else None
+                proxy = start_rpc_proxy(available_rpcs, config=config)
+                cleaned_fork_url = proxy.url
+                logger.info(
+                    "Started RPC failover proxy at %s for %d upstream providers",
+                    proxy.url,
+                    len(available_rpcs),
+                )
         else:
-            _anvil_rpc_state.rpc_index += 1
-        rpc_index = _anvil_rpc_state.rpc_index % len(available_rpcs)
-        cleaned_fork_url = available_rpcs[rpc_index]
-        logger.info("Multi RPC detected, using Anvil at RPC endpoint %d/%d: %s", rpc_index + 1, len(available_rpcs), cleaned_fork_url)
+            # proxy_multiple_upstream is False, or only one RPC available —
+            # fall back to legacy round-robin across launches.
+            if not hasattr(_anvil_rpc_state, "rpc_index"):
+                _anvil_rpc_state.rpc_index = random.randint(0, len(available_rpcs) - 1)
+            else:
+                _anvil_rpc_state.rpc_index += 1
+            rpc_index = _anvil_rpc_state.rpc_index % len(available_rpcs)
+            cleaned_fork_url = available_rpcs[rpc_index]
+            logger.info("Using Anvil at RPC endpoint %d/%d: %s", rpc_index + 1, len(available_rpcs), cleaned_fork_url)
     else:
         cleaned_fork_url = fork_url if not fork_url or not fork_url.startswith("mev+") else fork_url.replace("mev+", "", 1)
 
-    # Check given RPC works
+    # Check given RPC works.
+    # When a proxy is active, smoke-test one of the upstream URLs directly
+    # rather than through the proxy. The proxy has its own (longer) timeout
+    # budget for failover; testing it with the short smoke-test timeout
+    # would defeat the purpose and raise false positives.
     if fork_url and rpc_smoke_test:
-        web3 = Web3(HTTPProvider(cleaned_fork_url, request_kwargs={"timeout": test_request_timeout}))
+        smoke_test_url = available_rpcs[0] if (proxy is not None and available_rpcs) else cleaned_fork_url
+        web3 = Web3(HTTPProvider(smoke_test_url, request_kwargs={"timeout": test_request_timeout}))
         # Will raise an exception if not working
         try:
             current_rpc_block = web3.eth.block_number
         except Exception as e:
-            raise ValueError(f"RPC smoke test failed for {cleaned_fork_url}: {e}") from e
+            # Clean up the proxy if we started one
+            if proxy is not None and proxy_managed:
+                proxy.close()
+            raise ValueError(f"RPC smoke test failed for {smoke_test_url}: {e}") from e
 
         fork_block_number = _select_safe_fork_block_number(
             web3=web3,
@@ -771,13 +883,18 @@ def launch_anvil(
 
         # If archive mode and fork_block_number specified, verify RPC can access historical blocks
         if archive and fork_block_number is not None:
-            _verify_archive_node_access(
-                web3=web3,
-                rpc_url=cleaned_fork_url,
-                fork_block_number=fork_block_number,
-                current_block=current_rpc_block,
-                timeout=test_request_timeout,
-            )
+            try:
+                _verify_archive_node_access(
+                    web3=web3,
+                    rpc_url=smoke_test_url,
+                    fork_block_number=fork_block_number,
+                    current_block=current_rpc_block,
+                    timeout=test_request_timeout,
+                )
+            except Exception:
+                if proxy is not None and proxy_managed:
+                    proxy.close()
+                raise
 
     # https://book.getfoundry.sh/reference/anvil/
     args = dict(
@@ -868,6 +985,8 @@ def launch_anvil(
             # behind the tip, but keep this comment here because this stderr is
             # otherwise very confusing when seen in logs or CI output.
             if fork_block_number and any(p in stderr_str for p in archive_error_patterns):
+                if proxy is not None and proxy_managed:
+                    proxy.close()
                 raise ArchiveNodeRequired(
                     f"Anvil failed to fork {cleaned_fork_url} at block {fork_block_number:,}: the RPC does not provide full archive state access. Anvil stderr: {stderr_str[:500]}",
                     rpc_url=cleaned_fork_url,
@@ -882,6 +1001,8 @@ def launch_anvil(
                     logger.info("anvil did not start properly, try again, attempts left %d", attempts_left)
                     continue
 
+            if proxy is not None and proxy_managed:
+                proxy.close()
             raise AssertionError(f"Could not read block number from Anvil after the launch with command '{cmd}': at {url}, stdout is {len(stdout)} bytes, stderr is {len(stderr)} bytes")
         else:
             # We have a successful launch
@@ -893,7 +1014,7 @@ def launch_anvil(
     for account in unlocked_addresses:
         unlock_account(web3, account)
 
-    return AnvilLaunch(port, final_cmd, url, process)
+    return AnvilLaunch(port, final_cmd, url, process, proxy=proxy, _proxy_managed=proxy_managed)
 
 
 def unlock_account(web3: Web3, address: str):

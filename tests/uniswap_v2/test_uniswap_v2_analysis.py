@@ -8,13 +8,13 @@ from web3 import EthereumTesterProvider, Web3
 from web3.contract import Contract
 
 from eth_defi.token import create_token
-from eth_defi.uniswap_v2.analysis import TradeFail, TradeSuccess, analyse_trade_by_hash, analyse_trade_by_receipt
-from eth_defi.uniswap_v2.deployment import (
-    FOREVER_DEADLINE,
-    UniswapV2Deployment,
-    deploy_trading_pair,
-    deploy_uniswap_v2_like,
-)
+from eth_defi.uniswap_v2.analysis import (TradeFail, TradeSuccess,
+                                          analyse_trade_by_hash,
+                                          analyse_trade_by_receipt)
+from eth_defi.uniswap_v2.deployment import (FOREVER_DEADLINE,
+                                            UniswapV2Deployment,
+                                            deploy_trading_pair,
+                                            deploy_uniswap_v2_like)
 
 
 @pytest.fixture
@@ -118,7 +118,8 @@ def test_analyse_buy_success(web3: Web3, deployer: str, user_1, uniswap_v2: Unis
         FOREVER_DEADLINE,
     ).transact({"from": user_1})
 
-    analysis = analyse_trade_by_hash(web3, uniswap_v2, tx_hash)
+    # Disable token cache to avoid stale entries from other tests using deterministic addresses
+    analysis = analyse_trade_by_hash(web3, uniswap_v2, tx_hash, token_cache=None)
     assert isinstance(analysis, TradeSuccess)
     assert analysis.price == pytest.approx(Decimal(1 / 1755.115346038114345242609866))
     assert analysis.get_effective_gas_price_gwei() == 1
@@ -176,7 +177,8 @@ def test_analyse_sell_success(web3: Web3, deployer: str, user_1, uniswap_v2: Uni
     usdc_left = usdc.functions.balanceOf(user_1).call() / (10.0**6)
     assert usdc_left == pytest.approx(497.0895)
 
-    analysis = analyse_trade_by_hash(web3, uniswap_v2, tx_hash)
+    # Disable token cache to avoid stale entries from other tests using deterministic addresses
+    analysis = analyse_trade_by_hash(web3, uniswap_v2, tx_hash, token_cache=None)
     assert isinstance(analysis, TradeSuccess)
     assert analysis.price == pytest.approx(Decimal("1744.899124998896692270848706"))
     assert analysis.get_effective_gas_price_gwei() == 1
@@ -230,7 +232,7 @@ def test_analyse_trade_failed(eth_tester: EthereumTester, web3: Web3, deployer: 
 
         eth_tester.mine_block()
 
-        analysis = analyse_trade_by_hash(web3, uniswap_v2, tx_hash)
+        analysis = analyse_trade_by_hash(web3, uniswap_v2, tx_hash, token_cache=None)
         assert isinstance(analysis, TradeFail)
         assert analysis.get_effective_gas_price_gwei() == 1
         assert analysis.revert_reason == "execution reverted: TransferHelper: TRANSFER_FROM_FAILED"
@@ -286,8 +288,8 @@ def test_analyse_by_receipt(web3: Web3, deployer: str, user_1, uniswap_v2: Unisw
     tx = web3.eth.get_transaction(tx_hash)
     receipt = web3.eth.get_transaction_receipt(tx_hash)
 
-    # user_1 has less than 500 USDC left to loses in the LP fees
-    analysis = analyse_trade_by_receipt(web3, uniswap_v2, tx, tx_hash, receipt, pair_fee=0.003)
+    # Disable token cache to avoid stale entries from other tests using deterministic addresses
+    analysis = analyse_trade_by_receipt(web3, uniswap_v2, tx, tx_hash, receipt, pair_fee=0.003, token_cache=None)
     assert isinstance(analysis, TradeSuccess)
     assert analysis.price == pytest.approx(Decimal("1744.899124998896692270848706"))
     assert analysis.get_effective_gas_price_gwei() == 1
