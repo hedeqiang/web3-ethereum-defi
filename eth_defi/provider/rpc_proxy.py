@@ -223,6 +223,26 @@ class RPCProxyConfig:
             # later in this module, so we resolve it at runtime.
             self.failure_handler = default_failure_handler
 
+    def describe(self) -> str:
+        """Return a human-readable summary of non-default configuration for logging.
+
+        Only includes fields whose values differ from the class defaults,
+        so the output stays concise. Returns an empty string when all
+        values are at their defaults.
+
+        Example output::
+
+            timeout=15.0, retries=5, auto_switch_request_count=50
+        """
+        defaults = RPCProxyConfig()
+        # Restore the real default for failure_handler comparison
+        parts = []
+        for f in ("timeout", "retries", "backoff", "auto_switch_request_count", "pool_maxsize", "max_error_replies", "log_max_size"):
+            val = getattr(self, f)
+            if val != getattr(defaults, f):
+                parts.append(f"{f}={val!r}")
+        return ", ".join(parts)
+
 
 # ---------------------------------------------------------------------------
 # Failure detection
@@ -872,12 +892,15 @@ def start_rpc_proxy(
         server.shutdown()
         raise RuntimeError(f"RPC proxy {proxy_name!r} failed to start on port {port} within 2 seconds")
 
+    config_desc = config.describe()
+    config_suffix = f", config: {config_desc}" if config_desc else ""
     logger.info(
-        "RPC proxy %r started at %s with %d upstream providers: %s",
+        "RPC proxy %r started at %s with %d upstream providers: %s%s",
         proxy_name,
         url,
         len(rpc_urls),
         ", ".join(provider_keys),
+        config_suffix,
     )
 
     return RPCProxy(
