@@ -215,11 +215,62 @@ def make_anvil_custom_rpc_request(web3: Web3, method: str, args: Optional[list] 
         response = web3.provider.make_request(method, args)  # type: ignore
         if "result" in response:
             return response["result"]
-
     except (AttributeError, RequestsConnectionError):
         raise RPCRequestError("Web3 is not connected.")
 
     raise RPCRequestError(response["error"]["message"])
+
+
+def _warm_up_fork_block(
+    json_rpc_url: str,
+    block_number: int,
+    timeout: float = 60.0,
+) -> None:
+    """Warm up a forked block by forcing Anvil to fetch the full block body once.
+
+    This issues ``eth_getBlockByNumber(block, true)`` against the local Anvil
+    instance. On some forked networks this can be an expensive first-time read;
+    doing it eagerly during startup helps move the cost from an arbitrary later
+    contract interaction to a predictable warm-up phase.
+
+    :param json_rpc_url:
+        Local Anvil JSON-RPC URL.
+
+    :param block_number:
+        The block number to warm up.
+
+    :param timeout:
+        HTTP request timeout in seconds for the warm-up request.
+    """
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "eth_getBlockByNumber",
+        "params": [hex(block_number), True],
+        "id": 1,
+    }
+
+    logger.info(
+        "Warming up Anvil fork block %d with eth_getBlockByNumber(..., true)",
+        block_number,
+    )
+    response = requests.post(json_rpc_url, json=payload, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    if "error" in data:
+        raise RPCRequestError(f"Anvil fork block warm-up failed: {data['error']}")
+
+    result = data.get("result")
+    if result is None:
+        raise RPCRequestError(
+            f"Anvil fork block warm-up returned no block for {block_number}",
+        )
+
+    tx_count = len(result.get("transactions", []))
+    logger.info(
+        "Anvil fork block %d warm-up completed with %d transactions",
+        block_number,
+        tx_count,
+    )
 
 
 @dataclass
@@ -534,6 +585,7 @@ def launch_anvil(
     rpc_smoke_test=True,
     verbose=False,
     inherit_stdio: bool = False,
+    warm_up_block: bool = False,
     archive: bool = True,
     proxy_multiple_upstream: "RPCProxy | RPCProxyConfig | bool" = True,
 ) -> AnvilLaunch:
@@ -738,6 +790,15 @@ def launch_anvil(
             when the process is shut down. If Anvil is very chatty, those pipe
             buffers can fill up and stall the subprocess.
 
+    :param warm_up_block:
+        If ``True`` and running in fork mode, eagerly call
+        ``eth_getBlockByNumber(fork_block, true)`` against the freshly started
+        local Anvil instance.
+
+        This can move an expensive first fork hydration from an arbitrary later
+        request to startup. It does not remove the cost, but it makes it happen
+        once, predictably, before the caller starts using the node.
+
     :param archive:
         Check that the RPC endpoint provides archive node access.
 
@@ -937,6 +998,8 @@ def launch_anvil(
     current_block = chain_id = None
 
     while attempts_left > 0:
+        current_block = None
+        chain_id = None
         process, final_cmd = _launch(
             cmd,
             inherit_stdio=inherit_stdio,
@@ -1023,6 +1086,44 @@ def launch_anvil(
                 proxy.close()
             raise AssertionError(f"Could not read block number from Anvil after the launch with command '{cmd}': at {url}, stdout is {len(stdout)} bytes, stderr is {len(stderr)} bytes")
         else:
+            warm_up_target_block = fork_block_number if fork_url else None
+            if warm_up_target_block is None and fork_url:
+                warm_up_target_block = current_block
+
+            if warm_up_block and warm_up_target_block is not None:
+                try:
+                    _warm_up_fork_block(url, warm_up_target_block)
+                except (
+                    RequestsConnectionError,
+                    requests.exceptions.HTTPError,
+                    requests.exceptions.ReadTimeout,
+                    requests.exceptions.Timeout,
+                    ValueError,
+                    RPCRequestError,
+                ) as e:
+                    logger.error(
+                        "Anvil fork block warm-up failed at block %d: %s",
+                        warm_up_target_block,
+                        e,
+                    )
+                    shutdown_hard(
+                        process,
+                        log_level=logging.ERROR,
+                        block=True,
+                        check_port=port,
+                    )
+                    attempts_left -= 1
+                    if attempts_left > 0:
+                        logger.info(
+                            "Retrying Anvil launch after failed block warm-up, attempts left %d",
+                            attempts_left,
+                        )
+                        continue
+
+                    if proxy is not None and proxy_managed:
+                        proxy.close()
+                    raise
+
             # We have a successful launch
             break
     # Use f-string for a thousand separator formatting
