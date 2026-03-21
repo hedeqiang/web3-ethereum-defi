@@ -167,6 +167,7 @@ def run_post_processing(
     scan_hypercore: bool = False,
     scan_grvt: bool = False,
     scan_lighter: bool = False,
+    skip_cleaning: bool = False,
     skip_sparklines: bool = False,
     skip_metadata: bool = False,
     skip_data: bool = False,
@@ -183,6 +184,7 @@ def run_post_processing(
     :param scan_hypercore: Whether to merge Hypercore data
     :param scan_grvt: Whether to merge GRVT data
     :param scan_lighter: Whether to merge Lighter data
+    :param skip_cleaning: Skip price cleaning step
     :param skip_sparklines: Skip sparkline image export to R2
     :param skip_metadata: Skip protocol/stablecoin metadata export to R2
     :param skip_data: Skip data file (parquet, pickle) export to R2
@@ -199,7 +201,10 @@ def run_post_processing(
     steps.update(merge_results)
 
     # Step 2: Clean prices
-    steps["clean-prices"] = clean_prices()
+    if skip_cleaning:
+        logger.info("Skipping price cleaning (SKIP_CLEANING=true)")
+    else:
+        steps["clean-prices"] = clean_prices()
 
     # Step 3: Export sparklines
     if skip_sparklines:

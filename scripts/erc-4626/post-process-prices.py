@@ -42,6 +42,7 @@ Pipeline control:
 - ``MERGE_HYPERCORE``: Merge Hyperliquid native vault data (default: ``false``)
 - ``MERGE_GRVT``: Merge GRVT native vault data (default: ``false``)
 - ``MERGE_LIGHTER``: Merge Lighter native pool data (default: ``false``)
+- ``SKIP_CLEANING``: Skip price cleaning step (default: ``false``)
 - ``SKIP_SPARKLINES``: Skip sparkline image export to R2 (default: ``false``)
 - ``SKIP_METADATA``: Skip protocol/stablecoin metadata export to R2 (default: ``false``)
 - ``SKIP_DATA``: Skip data file (parquet, pickle) export to R2 (default: ``false``)
@@ -98,6 +99,7 @@ def main():
     merge_hypercore = os.environ.get("MERGE_HYPERCORE", "false").lower() == "true"
     merge_grvt = os.environ.get("MERGE_GRVT", "false").lower() == "true"
     merge_lighter = os.environ.get("MERGE_LIGHTER", "false").lower() == "true"
+    skip_cleaning = os.environ.get("SKIP_CLEANING", "false").lower() == "true"
     skip_sparklines = os.environ.get("SKIP_SPARKLINES", "false").lower() == "true"
     skip_metadata = os.environ.get("SKIP_METADATA", "false").lower() == "true"
     skip_data = os.environ.get("SKIP_DATA", "false").lower() == "true"
@@ -116,8 +118,11 @@ def main():
         logger.info("No native protocol merges requested (set MERGE_HYPERCORE/MERGE_GRVT/MERGE_LIGHTER=true)")
 
     # Step 2: Clean prices
-    logger.info("Step 2: Cleaning prices")
-    steps["clean-prices"] = clean_prices()
+    if skip_cleaning:
+        logger.info("Step 2: Skipping price cleaning (SKIP_CLEANING=true)")
+    else:
+        logger.info("Step 2: Cleaning prices")
+        steps["clean-prices"] = clean_prices()
 
     # Step 3: Export sparklines to R2
     if skip_sparklines:
