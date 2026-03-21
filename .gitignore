@@ -45,3 +45,6 @@ logs/
 # Created by agents running their tools
 node_modules/
 node_modules/.cache
+
+# Claude working on work trees
+.claude/worktrees
