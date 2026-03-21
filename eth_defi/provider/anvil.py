@@ -686,10 +686,20 @@ def launch_anvil(
 
     - :py:func:`eth_defi.trace.print_symbolic_trace`
 
+    - :py:func:`create_anvil_snapshot_state`
+
+    - :py:func:`reset_anvil_snapshot`
+
     .. note ::
 
         Looks like we have some issues Anvil instance lingering around even
         after `AnvilLaunch.close()` if scoped pytest fixtures are used.
+
+        If you intentionally keep a fork alive across multiple tests, pair a
+        module-scoped ``launch_anvil()`` / ``fork_network_anvil()`` fixture
+        with :py:func:`create_anvil_snapshot_state` and
+        :py:func:`reset_anvil_snapshot` so you can reset state cheaply between
+        tests.
 
     :param cmd:
         Override `anvil` command. If not given we look up from `PATH`.
@@ -1187,6 +1197,55 @@ def snapshot(web3: Web3) -> int:
     return int(make_anvil_custom_rpc_request(web3, "evm_snapshot", []), 16)
 
 
+@dataclass(slots=True)
+class AnvilSnapshotState:
+    """Mutable reset point for a shared Anvil backend.
+
+    This helper is designed for pytest suites that keep one Anvil process
+    alive across multiple tests and reset it cheaply using
+    ``evm_snapshot`` / ``evm_revert`` instead of relaunching the fork each
+    time.
+
+    Use :py:func:`create_anvil_snapshot_state` to take the initial snapshot
+    and :py:func:`reset_anvil_snapshot` to restore it between tests.
+
+    .. note::
+
+        Only use this pattern in **self-contained** test modules or conftest
+        files where the ``web3`` fixture is not overridden by sibling modules.
+        Placing an ``autouse=True`` restore fixture in a shared ``conftest.py``
+        causes ``ScopeMismatch`` errors when other test modules in the same
+        directory override ``web3`` with function scope (e.g. for a different
+        chain). Additionally, module-scoped Anvil forks combined with repeated
+        snapshot/revert cycles can hang on CI runners under ``pytest-xdist``
+        parallel execution, likely due to Anvil process responsiveness
+        degradation after many revert cycles.
+
+    Example:
+
+    .. code-block:: python
+
+        import pytest
+
+        from eth_defi.provider.anvil import AnvilSnapshotState, create_anvil_snapshot_state, reset_anvil_snapshot
+
+
+        @pytest.fixture(scope="module")
+        def deployed_state(web3, deploy_info) -> AnvilSnapshotState:
+            # deploy_info is resolved first so the snapshot captures the
+            # expensive post-deployment baseline
+            return create_anvil_snapshot_state(web3)
+
+
+        @pytest.fixture(autouse=True)
+        def restore_deployed_state(web3, deployed_state) -> None:
+            reset_anvil_snapshot(web3, deployed_state)
+    """
+
+    #: Latest reusable Anvil snapshot id.
+    snapshot_id: int
+
+
 def revert(web3: Web3, snapshot_id: int) -> bool:
     """Call evm_revert on Anvil
 
@@ -1197,6 +1256,34 @@ def revert(web3: Web3, snapshot_id: int) -> bool:
     """
     ret_val = make_anvil_custom_rpc_request(web3, "evm_revert", [snapshot_id])
     return ret_val
+
+
+def create_anvil_snapshot_state(web3: Web3) -> AnvilSnapshotState:
+    """Capture the current Anvil state for later reuse.
+
+    This is the manual building block for snapshot-based fixtures. Call this
+    once after the expensive setup you want to reuse, such as a mainnet fork or
+    a full protocol deployment.
+
+    See :py:class:`AnvilSnapshotState` for a pytest usage example.
+    """
+
+    return AnvilSnapshotState(snapshot_id=snapshot(web3))
+
+
+def reset_anvil_snapshot(web3: Web3, state: AnvilSnapshotState) -> None:
+    """Revert a shared Anvil backend to a stored snapshot and resave it.
+
+    ``evm_revert`` consumes the snapshot it restores. Because of this, the
+    helper immediately creates a new snapshot after each reset so the same
+    :py:class:`AnvilSnapshotState` instance can be reused by the next test.
+
+    See :py:class:`AnvilSnapshotState` for a pytest usage example.
+    """
+
+    reverted = revert(web3, state.snapshot_id)
+    assert reverted, f"Snapshot revert failed {state.snapshot_id}"
+    state.snapshot_id = snapshot(web3)
 
 
 def dump_state(web3: Web3) -> int:
