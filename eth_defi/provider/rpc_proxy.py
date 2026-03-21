@@ -224,24 +224,16 @@ class RPCProxyConfig:
             self.failure_handler = default_failure_handler
 
     def describe(self) -> str:
-        """Return a human-readable summary of non-default configuration for logging.
+        """Return a human-readable summary of the configuration for logging.
 
-        Only includes fields whose values differ from the class defaults,
-        so the output stays concise. Returns an empty string when all
-        values are at their defaults.
+        Includes all tuneable numeric fields for full visibility.
 
         Example output::
 
-            timeout=15.0, retries=5, auto_switch_request_count=50
+            timeout=30.0, retries=3, backoff=0.5, auto_switch_request_count=0, pool_maxsize=50, max_error_replies=100, log_max_size=2048
         """
-        defaults = RPCProxyConfig()
-        # Restore the real default for failure_handler comparison
-        parts = []
-        for f in ("timeout", "retries", "backoff", "auto_switch_request_count", "pool_maxsize", "max_error_replies", "log_max_size"):
-            val = getattr(self, f)
-            if val != getattr(defaults, f):
-                parts.append(f"{f}={val!r}")
-        return ", ".join(parts)
+        fields = ("timeout", "retries", "backoff", "auto_switch_request_count", "pool_maxsize", "max_error_replies", "log_max_size")
+        return ", ".join(f"{f}={getattr(self, f)!r}" for f in fields)
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +404,7 @@ class _ProxyRequestHandler(BaseHTTPRequestHandler):
         # Optional request payload logging
         if logger.isEnabledFor(self.server.config.request_log_level):
             payload_str = _truncate_payload(body, self.server.config.log_max_size)
-            logger.log(self.server.config.request_log_level, "RPC proxy request [%s]: %s", method, payload_str)
+            logger.log(self.server.config.request_log_level, "-> [%s]: %s", method, payload_str)
 
         # Try upstream providers with failover
         last_error = None
@@ -467,7 +459,7 @@ class _ProxyRequestHandler(BaseHTTPRequestHandler):
             # Optional response payload logging
             if logger.isEnabledFor(self.server.config.request_log_level):
                 payload_str = _truncate_payload(response_body, self.server.config.log_max_size)
-                logger.log(self.server.config.request_log_level, "RPC proxy response [%s] from %s (HTTP %d): %s", method, provider_key, status_code, payload_str)
+                logger.log(self.server.config.request_log_level, "<- [%s] from %s (HTTP %d): %s", method, provider_key, status_code, payload_str)
 
             # Check if the response indicates a retryable failure
             if self.server.config.failure_handler(status_code, parsed_response):
@@ -892,15 +884,13 @@ def start_rpc_proxy(
         server.shutdown()
         raise RuntimeError(f"RPC proxy {proxy_name!r} failed to start on port {port} within 2 seconds")
 
-    config_desc = config.describe()
-    config_suffix = f", config: {config_desc}" if config_desc else ""
     logger.info(
-        "RPC proxy %r started at %s with %d upstream providers: %s%s",
+        "RPC proxy %r started at %s with %d upstream providers: %s, config: %s",
         proxy_name,
         url,
         len(rpc_urls),
         ", ".join(provider_keys),
-        config_suffix,
+        config.describe(),
     )
 
     return RPCProxy(
