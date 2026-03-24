@@ -992,6 +992,8 @@ def deploy_safe_trading_strategy_module(
     verifier: Literal["etherscan", "blockscout", "sourcify", "oklink"] | None = None,
     verifier_url: str | None = None,
     enable_on_safe=True,
+    uniswap_v2: UniswapV2Deployment | None = None,
+    uniswap_v3: UniswapV3Deployment | None = None,
     cowswap: bool = False,
     velora: bool = False,
     gmx_deployment: GMXDeployment | None = None,
@@ -1058,7 +1060,7 @@ def deploy_safe_trading_strategy_module(
         module_gas = min(10_000_000, big_block_gas_limit - 100_000)
 
         # TradingStrategyModuleV0 uses external Forge libraries via DELEGATECALL:
-        # - UniswapLib: Uniswap V2/V3 swap validation (always deployed)
+        # - UniswapLib: Uniswap V2/V3 swap validation
         # - CowSwapLib: CowSwap order creation/signing
         # - GmxLib: GMX perpetuals validation
         # - HypercoreVaultLib: Hypercore vault validation (HyperEVM only)
@@ -1067,15 +1069,18 @@ def deploy_safe_trading_strategy_module(
 
         library_addresses = {}
 
-        # UniswapLib is always needed — it validates all Uniswap V2/V3 swaps
-        uniswap_lib = deploy_contract(
-            web3,
-            "guard/UniswapLib.json",
-            deployer,
-            gas=guard_gas,
-        )
-        library_addresses["UniswapLib"] = uniswap_lib.address
-        logger.info("Deployed UniswapLib at %s", uniswap_lib.address)
+        if uniswap_v2 or uniswap_v3:
+            uniswap_lib = deploy_contract(
+                web3,
+                "guard/UniswapLib.json",
+                deployer,
+                gas=guard_gas,
+            )
+            library_addresses["UniswapLib"] = uniswap_lib.address
+            logger.info("Deployed UniswapLib at %s", uniswap_lib.address)
+        else:
+            library_addresses["UniswapLib"] = ZERO_ADDRESS
+            logger.info("UniswapLib not needed, linking with zero address")
 
         if cowswap:
             cowswap_lib = deploy_contract(
@@ -1917,6 +1922,8 @@ def deploy_automated_lagoon_vault(
         verifier_url=verifier_url,
         use_forge=False,
         enable_on_safe=not guard_only,
+        uniswap_v2=uniswap_v2,
+        uniswap_v3=uniswap_v3,
         cowswap=cowswap,
         velora=velora,
         gmx_deployment=gmx_deployment,
