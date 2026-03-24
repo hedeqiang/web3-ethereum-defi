@@ -873,9 +873,10 @@ def calculate_period_metrics(
     period_samples_daily = share_price_daily.loc[daily_start:samples_end_at]
     daily_samples = len(period_samples_daily)
 
-    # Extract start and end share prices
-    share_price_start = period_samples_hourly.iloc[0]
-    share_price_end = period_samples_hourly.iloc[-1]
+    # Extract start and end share prices.
+    # Coerce to Python float to avoid pd.NA from PyArrow backend.
+    share_price_start = float(period_samples_hourly.iloc[0]) if pd.notna(period_samples_hourly.iloc[0]) else 0
+    share_price_end = float(period_samples_hourly.iloc[-1]) if pd.notna(period_samples_hourly.iloc[-1]) else 0
 
     # Calculate gross returns
     if share_price_start == 0:
@@ -982,13 +983,15 @@ def calculate_period_metrics(
     else:
         max_drawdown = 0
 
-    # Extract TVL metrics
+    # Extract TVL metrics.
+    # Coerce to Python float to avoid pd.NA leaking into PeriodMetrics
+    # (pd.NA breaks boolean checks like ``tvl or 0``).
     period_tvl = tvl.loc[samples_start_at:samples_end_at]
     if len(period_tvl) > 0:
-        tvl_start = period_tvl.iloc[0]
-        tvl_end = period_tvl.iloc[-1]
-        tvl_low = period_tvl.min()
-        tvl_high = period_tvl.max()
+        tvl_start = float(period_tvl.iloc[0]) if pd.notna(period_tvl.iloc[0]) else 0
+        tvl_end = float(period_tvl.iloc[-1]) if pd.notna(period_tvl.iloc[-1]) else 0
+        tvl_low = float(period_tvl.min()) if pd.notna(period_tvl.min()) else 0
+        tvl_high = float(period_tvl.max()) if pd.notna(period_tvl.max()) else 0
     else:
         tvl_start = tvl_end = tvl_low = tvl_high = 0
 
