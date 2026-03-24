@@ -1,9 +1,14 @@
+import logging
 from types import SimpleNamespace
 
 import pytest
 
 from eth_defi.erc_4626.vault_protocol.lagoon.deployment import should_enable_hypercore_guard
-from eth_defi.hyperliquid.evm_escrow import _assert_activation_guard_config
+from eth_defi.hyperliquid.evm_escrow import (
+    HypercorePrecompileReadError,
+    _assert_activation_guard_config,
+    is_account_activated,
+)
 
 
 class _FakeCall:
@@ -73,3 +78,27 @@ def test_activation_guard_check_accepts_whitelisted_hypercore_setup():
         vault,
         "0x6B9E773128f453f5c2C60935Ee2DE2CBc5390A24",
     )
+
+
+def test_is_account_activated_reports_empty_precompile_reply(caplog: pytest.LogCaptureFixture):
+    """Test empty precompile replies raise a clear RPC error with provider context.
+
+    1. Build a fake HyperEVM Web3 object whose precompile call returns empty bytes.
+    2. Call ``is_account_activated()`` for a valid address.
+    3. Verify the raised error and log message include the RPC provider domain.
+    """
+    web3 = SimpleNamespace(
+        provider=SimpleNamespace(endpoint_uri="https://rpc.hyperliquid.xyz/evm"),
+        eth=SimpleNamespace(call=lambda tx: b""),
+    )
+
+    # 1. Build a fake HyperEVM Web3 object whose precompile call returns empty bytes.
+    # 2. Call ``is_account_activated()`` for a valid address.
+    # 3. Verify the raised error and log message include the RPC provider domain.
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(HypercorePrecompileReadError) as exc_info:
+            is_account_activated(web3, "0x49Be988d2090aa221586e9A51cacBA3D3A1eA087")
+
+    assert "rpc.hyperliquid.xyz" in str(exc_info.value)
+    assert "Last RPC headers" in str(exc_info.value)
+    assert "rpc.hyperliquid.xyz" in caplog.text

@@ -56,6 +56,7 @@ from eth_defi.etherscan.config import get_etherscan_url
 from eth_defi.event_reader.filter import Filter
 from eth_defi.event_reader.multicall_batcher import EncodedCall
 from eth_defi.event_reader.reader import read_events
+from eth_defi.hyperliquid.core_writer import CORE_DEPOSIT_WALLET, CORE_WRITER_ADDRESS
 from eth_defi.provider.env import read_json_rpc_url
 from eth_defi.provider.multi_provider import create_multi_provider_web3
 from eth_defi.safe.safe_compat import create_safe_ethereum_client
@@ -153,6 +154,18 @@ _EVENT_ADDRESS_PARAMS: dict[str, list[tuple[str, str]]] = {
     "CoreWriterApproved": [("coreWriter", "Hypercore CoreWriter")],
     "CoreDepositWalletApproved": [("wallet", "Hypercore deposit wallet")],
     "HypercoreVaultApproved": [("vault", "Hypercore vault")],
+}
+
+
+#: System contracts and other special-purpose addresses that do not expose a
+#: conventional ``name()`` view, but should still appear with a friendly label
+#: in guard configuration reports.
+SPECIAL_ADDRESS_LABELS: dict[str, str] = {
+    Web3.to_checksum_address(CORE_WRITER_ADDRESS): "Hypercore CoreWriter",
+    **{
+        Web3.to_checksum_address(address): "Hypercore deposit wallet"
+        for address in CORE_DEPOSIT_WALLET.values()
+    },
 }
 
 
@@ -396,9 +409,10 @@ def resolve_address_label(
     Resolution priority:
 
     1. **known_labels** — explicit overrides (e.g. Safe → ``<our multisig>``)
-    2. **name()** call — works for ERC-20 tokens, ERC-4626 vaults, etc.
-    3. **fallback_labels** — event-derived labels for contracts without ``name()``
-    4. ``<unknown>`` — last resort
+    2. **special_labels** — known system/precompile addresses without ``name()``
+    3. **name()** call — works for ERC-20 tokens, ERC-4626 vaults, etc.
+    4. **fallback_labels** — event-derived labels for contracts without ``name()``
+    5. ``<unknown>`` — last resort
 
     :param web3:
         Web3 connection for on-chain lookups.  If ``None``, only
@@ -428,7 +442,12 @@ def resolve_address_label(
         if label:
             return f"{label} ({checksum})"
 
-    # 2. Try calling name() on the contract
+    # 2. Handle well-known system contracts that do not implement name()
+    label = SPECIAL_ADDRESS_LABELS.get(checksum)
+    if label:
+        return f"{label} ({checksum})"
+
+    # 3. Try calling name() on the contract
     if web3 is not None:
         try:
             result = web3.eth.call(
@@ -444,7 +463,7 @@ def resolve_address_label(
         except Exception:
             pass
 
-    # 3. Check fallback labels (event-derived, lower priority than name())
+    # 4. Check fallback labels (event-derived, lower priority than name())
     if fallback_labels:
         label = fallback_labels.get(checksum)
         if label:
