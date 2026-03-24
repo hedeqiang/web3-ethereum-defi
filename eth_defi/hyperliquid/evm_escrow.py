@@ -104,18 +104,23 @@ from __future__ import annotations
 
 import logging
 import time
+from pprint import pformat
 from typing import TYPE_CHECKING
 
 from eth_abi import decode, encode
+from eth_abi.exceptions import InsufficientDataBytes
 from eth_typing import HexAddress
 from web3 import Web3
 
 from eth_defi.abi import get_deployed_contract
+from eth_defi.event_reader.fast_json_rpc import get_last_headers
 from eth_defi.hotwallet import HotWallet
 from eth_defi.hyperliquid.api import fetch_spot_clearinghouse_state
 from eth_defi.hyperliquid.core_writer import CORE_DEPOSIT_WALLET, SPOT_DEX, get_core_deposit_wallet_contract
 from eth_defi.hyperliquid.session import HyperliquidSession
+from eth_defi.provider.named import get_provider_name
 from eth_defi.trace import assert_transaction_success_with_explanation
+from eth_defi.utils import get_url_domain
 
 if TYPE_CHECKING:
     from eth_defi.erc_4626.vault_protocol.lagoon.vault import LagoonVault
@@ -131,6 +136,36 @@ CORE_USER_EXISTS_ADDRESS = "0x0000000000000000000000000000000000000810"
 #: New HyperCore accounts incur a ~1 USDC fee, so the minimum
 #: activation deposit must comfortably exceed that.
 DEFAULT_ACTIVATION_AMOUNT = 2_000_000
+
+
+class HypercorePrecompileReadError(RuntimeError):
+    """Raised when a HyperCore precompile returns malformed data."""
+
+
+def _get_loggable_rpc_provider_name(web3: Web3) -> str:
+    """Return the current RPC provider domain without exposing secrets."""
+    provider = web3.provider
+    endpoint_uri = None
+
+    if hasattr(provider, "call_endpoint_uri"):
+        endpoint_uri = provider.call_endpoint_uri
+    elif hasattr(provider, "endpoint_uri"):
+        endpoint_uri = provider.endpoint_uri
+
+    if endpoint_uri:
+        domain = get_url_domain(endpoint_uri)
+        if domain:
+            return domain
+
+    return get_provider_name(provider)
+
+
+def _format_rpc_headers_for_error() -> str:
+    """Format the last recorded RPC response headers for exception messages."""
+    headers = get_last_headers()
+    if not headers:
+        return "No RPC response headers captured."
+    return pformat(headers)
 
 
 def is_account_activated(
@@ -181,7 +216,40 @@ def is_account_activated(
             "data": "0x" + data.hex(),
         }
     )
-    exists = decode(["bool"], result)[0]
+    provider_name = _get_loggable_rpc_provider_name(web3)
+    rpc_headers = _format_rpc_headers_for_error()
+
+    if result == "0x" or len(result) == 0:
+        logger.error(
+            "Account %s coreUserExists returned empty reply from RPC provider %s. Last headers: %s",
+            user,
+            provider_name,
+            rpc_headers,
+        )
+        raise HypercorePrecompileReadError(
+            f"HyperCore coreUserExists precompile returned an empty reply for {user}. "
+            f"RPC provider: {provider_name}. "
+            "This usually indicates a faulty HyperEVM RPC response, not a valid activation status. "
+            f"Last RPC headers: {rpc_headers}"
+        )
+
+    try:
+        exists = decode(["bool"], result)[0]
+    except InsufficientDataBytes as e:
+        logger.error(
+            "Account %s coreUserExists returned malformed reply of %d bytes from RPC provider %s. Last headers: %s",
+            user,
+            len(result),
+            provider_name,
+            rpc_headers,
+        )
+        raise HypercorePrecompileReadError(
+            f"HyperCore coreUserExists precompile returned malformed data for {user}. "
+            f"Reply length: {len(result)} bytes. "
+            f"RPC provider: {provider_name}. "
+            f"Last RPC headers: {rpc_headers}"
+        ) from e
+
     logger.info("Account %s coreUserExists on HyperCore: %s", user, exists)
     return exists
 
