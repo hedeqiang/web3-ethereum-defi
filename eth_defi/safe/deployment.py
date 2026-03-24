@@ -301,7 +301,7 @@ def add_new_safe_owners(
     owners: list[HexAddress | str],
     threshold: int,
     gas_per_tx=500_000,
-    gnosis_safe_state_safety_sleep=20,
+    gnosis_safe_state_safety_sleep=12,
 ):
     """Update Safe owners and threshold list.
 
