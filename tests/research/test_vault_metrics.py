@@ -12,7 +12,8 @@ from plotly.graph_objects import Figure
 
 from eth_defi.research.sparkline import export_sparkline_as_png, export_sparkline_as_svg, extract_vault_price_data, render_sparkline_simple
 from eth_defi.research.vault_benchmark import visualise_vault_return_benchmark
-from eth_defi.research.vault_metrics import PeriodMetrics, calculate_lifetime_metrics, calculate_period_metrics, display_vault_chart_and_tearsheet, export_lifetime_row, format_lifetime_table
+from eth_defi.research.vault_metrics import PeriodMetrics, apply_abnormal_value_checks, calculate_lifetime_metrics, calculate_period_metrics, display_vault_chart_and_tearsheet, export_lifetime_row, format_lifetime_table
+from eth_defi.vault.flag import VaultFlag
 from eth_defi.vault.base import VaultSpec
 from eth_defi.vault.fee import FeeData, VaultFeeMode
 from eth_defi.vault.risk import VaultTechnicalRisk
@@ -249,6 +250,38 @@ def test_calculate_period_metrics(
     assert metrics_lifetime.daily_samples > 0
     assert metrics_lifetime.tvl_start > 0
     assert metrics_lifetime.tvl_end > 0
+
+
+def test_apply_abnormal_value_checks_handles_pandas_na():
+    """Regression test for pandas.NA values in numeric comparisons."""
+
+    risk, notes, flags = apply_abnormal_value_checks(
+        risk=VaultTechnicalRisk.negligible,
+        notes="",
+        flags=set(),
+        current_nav=pd.NA,
+        current_share_price=pd.NA,
+        three_months_volatility=pd.NA,
+    )
+
+    assert risk == VaultTechnicalRisk.negligible
+    assert notes == ""
+    assert flags == set()
+
+    risk, notes, flags = apply_abnormal_value_checks(
+        risk=VaultTechnicalRisk.negligible,
+        notes="",
+        flags=set(),
+        current_nav=100_000_000_001,
+        current_share_price=1_000_001,
+        three_months_volatility=10_001,
+    )
+
+    assert risk == VaultTechnicalRisk.blacklisted
+    assert notes
+    assert VaultFlag.abnormal_tvl in flags
+    assert VaultFlag.abnormal_share_price in flags
+    assert VaultFlag.abnormal_volatility in flags
 
 
 def test_vault_charts(

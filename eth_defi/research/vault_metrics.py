@@ -1058,6 +1058,10 @@ def apply_abnormal_value_checks(
         Updated (risk, notes, flags) tuple.
     """
 
+    def _has_numeric_value(value: float | None) -> bool:
+        """Check if a value is present before numeric comparisons."""
+        return value is not None and not pd.isna(value)
+
     def _ensure_mutable_flags(flags):
         # TODO: Hack to break somewhere reused empty set object
         # which gets shared across all vaults
@@ -1065,19 +1069,19 @@ def apply_abnormal_value_checks(
             return set()
         return flags
 
-    if current_nav is not None and current_nav > MAX_VALID_NAV:
+    if _has_numeric_value(current_nav) and current_nav > MAX_VALID_NAV:
         risk = VaultTechnicalRisk.blacklisted
         notes = ABNORMAL_TVL
         flags = _ensure_mutable_flags(flags)
         flags.add(VaultFlag.abnormal_tvl)
 
-    if current_share_price is not None and current_share_price > MAX_VALID_SHARE_PRICE:
+    if _has_numeric_value(current_share_price) and current_share_price > MAX_VALID_SHARE_PRICE:
         risk = VaultTechnicalRisk.blacklisted
         notes = ABNORMAL_SHARE_PRICE
         flags = _ensure_mutable_flags(flags)
         flags.add(VaultFlag.abnormal_share_price)
 
-    if three_months_volatility is not None and three_months_volatility > MAX_VALID_VOLATILITY:
+    if _has_numeric_value(three_months_volatility) and three_months_volatility > MAX_VALID_VOLATILITY:
         risk = VaultTechnicalRisk.blacklisted
         notes = ABNORMAL_VOLATILITY
         flags = _ensure_mutable_flags(flags)
