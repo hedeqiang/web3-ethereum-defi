@@ -580,21 +580,59 @@ def scan_lighter_fn(max_workers: int) -> ChainResult:
     return result
 
 
+def _load_last_timestamps() -> dict[str, str]:
+    """Load the last data timestamp per chain from the uncleaned parquet.
+
+    Reads only the ``chain`` and ``timestamp`` columns for efficiency.
+
+    :return:
+        Mapping of chain name to formatted date string (YYYY-MM-DD HH:MM).
+    """
+    from eth_defi.chain import get_chain_name
+
+    if not DEFAULT_UNCLEANED_PRICE_DATABASE.exists():
+        return {}
+
+    try:
+        import pyarrow.parquet as pq
+
+        table = pq.read_table(DEFAULT_UNCLEANED_PRICE_DATABASE, columns=["chain", "timestamp"])
+        if table.num_rows == 0:
+            return {}
+
+        df = table.to_pandas()
+        last_ts = df.groupby("chain")["timestamp"].max()
+        result = {}
+        for chain_id, ts in last_ts.items():
+            try:
+                name = get_chain_name(int(chain_id))
+            except Exception:
+                name = str(chain_id)
+            result[name] = ts.strftime("%Y-%m-%d %H:%M")
+        return result
+    except Exception as e:
+        logger.warning("Could not read last timestamps from parquet: %s", e)
+        return {}
+
+
 def print_dashboard(results: dict[str, ChainResult], display_order: list[str] | None = None) -> None:
     """Print console dashboard showing scan progress.
 
     :param results: Dictionary mapping chain name to result
     :param display_order: Optional list of chain names specifying display order
     """
+    # Load last data timestamps per chain from the uncleaned parquet
+    last_timestamps = _load_last_timestamps()
+
     # Clear screen (simple approach)
     print("\n" * 3)
 
     lines = []
-    lines.append("=" * 100)
-    lines.append(" " * 35 + "Chain Scan Progress")
-    lines.append("=" * 100)
-    lines.append(f"{'Chain':<15} {'Status':<10} {'Vaults':<8} {'New':<6} {'Blocks':<22} {'Duration':<10} {'Retry':<5}")
-    lines.append("-" * 100)
+    lines.append("=" * 115)
+    lines.append(" " * 40 + "Chain Scan Progress")
+    lines.append("=" * 115)
+    lines.append(f"{'Chain':<15} {'Status':<10} {'Vaults':<8} {'New':<6} {'Blocks':<22} {'Duration':<10} {'Retry':<5} {'Last data':<18}")
+    lines.append("-" * 115)
 
     # Use display_order if provided, otherwise use dict order
     if display_order:
@@ -615,8 +653,9 @@ def print_dashboard(results: dict[str, ChainResult], display_order: list[str] | 
 
         duration = f"{result.duration:.1f}s" if result.duration is not None else "-"
         retry = str(result.retry_attempt)
+        last_data = last_timestamps.get(result.name, "-")
 
-        line = f"{result.name:<15} {status:<10} {vaults:<8} {new:<6} {blocks:<22} {duration:<10} {retry:<5}"
+        line = f"{result.name:<15} {status:<10} {vaults:<8} {new:<6} {blocks:<22} {duration:<10} {retry:<5} {last_data:<18}"
         if result.status == "failed" and result.error:
             # Truncate long error messages to fit the dashboard
             error_msg = result.error[:40]
@@ -624,7 +663,7 @@ def print_dashboard(results: dict[str, ChainResult], display_order: list[str] | 
         lines.append(line)
 
     # Summary
-    lines.append("-" * 100)
+    lines.append("-" * 115)
     success_count = sum(1 for r in results.values() if r.status == "success")
     failed_count = sum(1 for r in results.values() if r.status == "failed")
     pending_count = sum(1 for r in results.values() if r.status == "pending")
@@ -632,7 +671,7 @@ def print_dashboard(results: dict[str, ChainResult], display_order: list[str] | 
     skipped_count = sum(1 for r in results.values() if r.status == "skipped")
 
     lines.append(f"Summary: {success_count} success, {failed_count} failed, {pending_count} pending, {running_count} running, {skipped_count} skipped")
-    lines.append("=" * 100)
+    lines.append("=" * 115)
 
     # Print to console and log at info level
     dashboard = "\n".join(lines)
