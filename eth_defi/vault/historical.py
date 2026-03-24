@@ -705,21 +705,13 @@ def scan_historical_prices_to_parquet(
 
     converted_iter = converter(entries_iter)
 
-    # Always use the current schema so new columns are not silently dropped
-    schema = VaultHistoricalRead.to_pyarrow_schema()
+    # Always use the current canonical schema so new columns are not silently dropped
+    canonical_schema = VaultHistoricalRead.to_pyarrow_schema()
 
     if output_fname.exists():
-        try:
-            logger.info("Reading existing Parquet file %s", output_fname)
-            existing_table = pq.read_table(output_fname)
-            existing_table = VaultHistoricalRead.migrate_parquet_schema(existing_table)
-        except pa.lib.ArrowInvalid as e:
-            logger.warning(
-                "Parquet file %s, write damaged %s, resetting",
-                output_fname,
-                str(e),
-            )
-            existing_table = None
+        logger.info("Reading existing Parquet file %s", output_fname)
+        existing_table = pq.read_table(output_fname)
+        existing_table = VaultHistoricalRead.migrate_parquet_schema(existing_table)
     else:
         logger.info("Creating Parquet from the scratch %s", output_fname)
         existing_table = None
@@ -759,6 +751,18 @@ def scan_historical_prices_to_parquet(
         existing = False
         existing_row_count = 0
 
+    # Build a unified writer schema: canonical columns + any extra columns
+    # from native protocol merges (e.g. account_pnl, leader_fraction).
+    # This preserves native protocol data when the EVM scanner rewrites the file.
+    if existing_table is not None:
+        canonical_names = set(canonical_schema.names)
+        extra_fields = [f for f in existing_table.schema if f.name not in canonical_names]
+        writer_schema = canonical_schema
+        for field in extra_fields:
+            writer_schema = writer_schema.append(field)
+    else:
+        writer_schema = canonical_schema
+
     # Perform atomic update of the prices Parquet file
     with tempfile.NamedTemporaryFile(
         mode="wb",
@@ -766,9 +770,9 @@ def scan_historical_prices_to_parquet(
         suffix=".parquet",
         delete=False,
     ) as tmp:
-        # Initialize ParquetWriter with the schema
+        # Initialize ParquetWriter with the unified schema
         temp_fname = tmp.name
-        writer = pq.ParquetWriter(temp_fname, schema, compression=compression)
+        writer = pq.ParquetWriter(temp_fname, writer_schema, compression=compression)
 
         if existing_table is not None:
             writer.write_table(existing_table)
@@ -792,13 +796,18 @@ def scan_historical_prices_to_parquet(
         written_at = native_datetime_utc_now()
         for chunk in chunked(converted_iter, chunk_size):
             logger.debug(f"Processing Parquet chunk {chunks_done:,}, rows written so far {rows_written:,}")
-            table = pa.Table.from_pylist(chunk, schema=schema)
+            table = pa.Table.from_pylist(chunk, schema=canonical_schema)
             # Stamp all rows in this batch with the same write timestamp
             table = table.set_column(
                 table.schema.get_field_index("written_at"),
                 "written_at",
                 pa.array([written_at] * len(table), type=pa.timestamp("ms")),
             )
+            # Pad with null columns for any extra native protocol fields
+            # so new EVM rows match the unified writer schema
+            for field in writer_schema:
+                if field.name not in table.schema.names:
+                    table = table.append_column(field, pa.nulls(len(table), type=field.type))
             writer.write_table(table)
             rows_written += len(chunk)
             chunks_done += 1
