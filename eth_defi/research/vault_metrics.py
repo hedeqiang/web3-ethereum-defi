@@ -1614,7 +1614,7 @@ def calculate_vault_rankings(
 
             # Apply exclusion criteria (common checks)
             is_blacklisted = row["risk"] == VaultTechnicalRisk.blacklisted
-            tvl = pm.tvl_end or 0
+            tvl = pm.tvl_end if pd.notna(pm.tvl_end) else 0
             has_no_cagr = cagr is None or cagr == 0 or pd.isna(cagr)
 
             # Chain/protocol rankings use lower TVL threshold
