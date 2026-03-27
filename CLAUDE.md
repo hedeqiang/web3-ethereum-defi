@@ -81,10 +81,18 @@ poetry run ruff format
 - For git worktrees, copy `.local-test.env` from the repo root.
 - For worktrees, unless you are changing package dependencies, use `poetry run` from the parent repo virtualenv
 
+## Commentary format
+
+Pull request description must have sections:
+
+- Why: the rational of change
+- Lessons learnt: memory
+- Summary: what was changed
+
+No test plan or verification section. Use Markdown formatting, headings.
 
 ## Pull requests
 
-- Pull request description must have sections Why (the rational of change), Lessons learnt (memory) and Summary (what was changed). No test plan or verification section. Use Markdown formatting, headings.
 - Only push changes to remote when asked, never update pull requess automatically.
 - Never push directly to a master if not told explicitly
 - If the user ask to open a pull request as feature then start the PR title with "feat:" prefix and also add one line about the feature into `CHANGELOG.md`
@@ -92,6 +100,10 @@ poetry run ruff format
 - Before opening or updating a pull request, format the code
 - When merging pull request, squash and merge commits and use the PR description as the commit message
 - If continuous integration (CI) tests fail on your PR, and they are marked flaky, run tests locally to repeat the issue if it is real flakiness or regression
+
+## Pushing to master
+
+- If you push directly to master, the commit message most follow *Commentary format* section
 
 ## Specific rules
 
