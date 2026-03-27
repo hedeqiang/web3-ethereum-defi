@@ -168,7 +168,7 @@ LOOKBACK_AND_TOLERANCES: dict[Period, tuple[pd.DateOffset, pd.Timedelta]] = {
     "1M": (pd.DateOffset(days=30), pd.Timedelta(days=60)),
     "3M": (pd.DateOffset(days=3 * 30), pd.Timedelta(days=90 + 45)),
     "6M": (pd.DateOffset(days=6 * 30), pd.Timedelta(days=180 + 45)),
-    "1Y": (pd.DateOffset(days=12 * 30), pd.Timedelta(days=365 + 45)),
+    "1Y": (pd.DateOffset(days=365), pd.Timedelta(days=365 + 45)),
     "lifetime": (pd.DateOffset(years=100), pd.Timedelta(days=100 * 365)),
 }
 
