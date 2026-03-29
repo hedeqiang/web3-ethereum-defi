@@ -590,6 +590,11 @@ class HyperliquidDailyMetricsDatabase:
         ``is_closed`` — disappearing from the bulk listing does not
         necessarily mean the vault is permanently closed.
 
+        Also writes a tombstone daily price row for today with ``tvl=0``
+        so that downstream consumers (e.g. forward-fill pipelines and
+        staleness checks) see a fresh row reflecting the vault's removal
+        instead of stale data from the last successful fetch.
+
         :param known_addresses:
             Set of lowercased vault addresses currently present in the
             bulk stats-data API response.
@@ -611,10 +616,180 @@ class HyperliquidDailyMetricsDatabase:
             disappeared,
         )
 
+        # Write a tombstone daily price row for each disappeared vault.
+        disappeared_addrs = [addr for _, addr in disappeared]
+        tombstone_count = self._write_tombstone_rows(disappeared_addrs)
+        if tombstone_count:
+            logger.info(
+                "Wrote %d tombstone price rows (TVL=0) for disappeared vaults",
+                tombstone_count,
+            )
+
         logger.info(
             "Marked %d vaults as disappeared (TVL=0)",
             len(disappeared),
         )
+
+    def tombstone_stale_vaults(
+        self,
+        known_api_addresses: set[str],
+        wind_down_days: int = 4,
+    ) -> int:
+        """Write tombstone rows for vaults that have fallen out of the processing pipeline.
+
+        The daily scan pipeline applies a TVL threshold (``min_tvl``) to decide
+        which vaults to process on each run.  Vaults that drop below this
+        threshold enter a "wind-down" window (controlled by
+        :py:meth:`get_recently_tracked_addresses`) where they continue to
+        receive daily price rows for a few more days, capturing the decline
+        towards zero TVL.
+
+        Once a vault's last data falls outside the wind-down window it is no
+        longer selected for processing at all.  However, its most recent daily
+        price row still carries the TVL value from when it was last processed —
+        often thousands of dollars.  Downstream consumers such as the
+        trade-executor's ``StaleVaultData`` check compare each vault's last
+        *real* (non-forward-filled) candle timestamp against a staleness
+        tolerance.  Because the old row has a high TVL, the vault is not
+        filtered out by the ``min_tvl`` guard in the staleness check, and the
+        stale timestamp triggers an alert.
+
+        This method closes the gap by writing a **tombstone** daily price row
+        for today on every vault that:
+
+        1. Has existing price data in the database.
+        2. Is **not present** in the current bulk API listing
+           (``known_api_addresses``).  Any vault still returned by the API is
+           alive — it may have been skipped this run due to ``max_vaults``
+           truncation, a transient fetch failure, or any other non-permanent
+           reason — and must never be tombstoned.
+        3. Has its most recent price row older than ``wind_down_days`` —
+           meaning the wind-down window has expired and the pipeline will
+           never process it again unless it reappears in the API.
+        4. Does **not** already have a tombstone row.
+
+        The tombstone row carries forward the last known ``share_price`` and
+        ``cumulative_pnl`` so that historical return calculations are not
+        distorted.  It sets ``tvl=0`` and ``data_source='tombstone'`` but
+        leaves ``is_closed`` and ``allow_deposits`` as ``None`` so that
+        the existing forward-filled state from the vault's last real row
+        is preserved — a vault that dropped below the TVL threshold is not
+        necessarily closed.  This ensures that:
+
+        - Forward-fill pipelines propagate the zero TVL, so the vault drops
+          below the ``min_tvl`` guard in staleness checks.
+        - The tombstone counts as a "real" data row, so the last real timestamp
+          is today rather than weeks ago.
+        - The vault is effectively retired from active monitoring without
+          deleting any historical data or misrepresenting its deposit status.
+
+        :param known_api_addresses:
+            Set of lowercased vault addresses currently present in the
+            bulk stats-data API response.  Vaults in this set are
+            considered alive and will never be tombstoned, even if their
+            data is stale.
+        :param wind_down_days:
+            Number of days after the last price row before a vault is
+            considered eligible for tombstoning.  Should match the
+            ``within_days`` parameter used in
+            :py:meth:`get_recently_tracked_addresses` so that tombstoning
+            kicks in exactly when the wind-down window expires.
+        :return:
+            Number of tombstone rows written.
+        """
+        cutoff = native_datetime_utc_now().date() - datetime.timedelta(days=wind_down_days)
+
+        # Find vaults with stale data that have no tombstone
+        candidates = self.con.execute(
+            """
+            SELECT vdp.vault_address
+            FROM vault_daily_prices vdp
+            WHERE vdp.vault_address NOT IN (
+                SELECT DISTINCT vault_address FROM vault_daily_prices WHERE data_source = 'tombstone'
+            )
+            GROUP BY vdp.vault_address
+            HAVING MAX(vdp.date) < ?
+            """,
+            [cutoff],
+        ).fetchall()
+
+        # Only tombstone vaults that are no longer in the API.
+        # A vault still in the API is alive and should not be zeroed out.
+        eligible = [addr for (addr,) in candidates if addr not in known_api_addresses]
+
+        count = self._write_tombstone_rows(eligible)
+        if count:
+            logger.info(
+                "Wrote %d tombstone price rows for vaults that fell out of the pipeline",
+                count,
+            )
+        return count
+
+    def _write_tombstone_rows(self, vault_addresses: list[str]) -> int:
+        """Write tombstone daily price rows for the given vault addresses.
+
+        For each address that has existing price data, writes a single row
+        for today with ``tvl=0`` and ``data_source='tombstone'``.  The last
+        known ``share_price`` and ``cumulative_pnl`` are carried forward so
+        historical return calculations are not distorted.
+
+        ``is_closed`` and ``allow_deposits`` are left as ``None`` so that the
+        ``COALESCE`` in :py:meth:`upsert_daily_prices` preserves whatever
+        state the vault already has.  A vault that dropped below the TVL
+        threshold or disappeared from the bulk listing is not necessarily
+        permanently closed — it may simply have very low TVL — and marking
+        it ``is_closed=True`` would propagate through the forward-fill in
+        :py:func:`~eth_defi.hyperliquid.vault_data_export.build_raw_prices_dataframe`
+        into ``deposit_closed_reason="Vault is permanently closed"``, which
+        is incorrect.
+
+        :param vault_addresses:
+            Lowercased vault addresses to tombstone.
+        :return:
+            Number of tombstone rows written.
+        """
+        if not vault_addresses:
+            return 0
+
+        today = native_datetime_utc_now().date()
+        now = native_datetime_utc_now()
+        tombstone_rows = []
+
+        for addr in vault_addresses:
+            last_row = self.con.execute(
+                """
+                SELECT share_price, cumulative_pnl
+                FROM vault_daily_prices
+                WHERE vault_address = ?
+                ORDER BY date DESC
+                LIMIT 1
+                """,
+                [addr],
+            ).fetchone()
+
+            if last_row is None:
+                continue
+
+            share_price, cumulative_pnl = last_row
+            tombstone_rows.append(
+                HyperliquidDailyPriceRow(
+                    vault_address=addr,
+                    date=today,
+                    share_price=share_price,
+                    tvl=0.0,
+                    cumulative_pnl=cumulative_pnl,
+                    daily_pnl=0.0,
+                    daily_return=0.0,
+                    follower_count=0,
+                    data_source="tombstone",
+                    written_at=now,
+                )
+            )
+
+        if tombstone_rows:
+            self.upsert_daily_prices(tombstone_rows)
+
+        return len(tombstone_rows)
 
     def upsert_daily_prices(
         self,
@@ -748,6 +923,20 @@ class HyperliquidDailyMetricsDatabase:
         rows = self.con.execute(
             "SELECT DISTINCT vault_address FROM vault_daily_prices WHERE date >= ?",
             [cutoff],
+        ).fetchall()
+        return {r[0] for r in rows}
+
+    def get_all_tracked_addresses(self) -> set[str]:
+        """Return all vault addresses that have any price data in the database.
+
+        Used by the full-scan mode to identify every vault we have ever
+        tracked, so we can refresh their data regardless of current TVL.
+
+        :return:
+            Set of lowercased vault addresses.
+        """
+        rows = self.con.execute(
+            "SELECT DISTINCT vault_address FROM vault_daily_prices",
         ).fetchall()
         return {r[0] for r in rows}
 
@@ -1352,6 +1541,7 @@ def run_daily_scan(
     timeout: float = 30.0,
     vault_addresses: list[str] | None = None,
     flow_backfill_days: int = 7,
+    full_scan: bool = False,
 ) -> HyperliquidDailyMetricsDatabase:
     """Run the daily Hyperliquid vault metrics scan.
 
@@ -1387,10 +1577,19 @@ def run_daily_scan(
         Only complete days are fetched (up to yesterday). Set to ``0``
         to disable flow fetching. Use a large value (e.g. ``365``) for
         initial deep backfill.
+    :param full_scan:
+        When ``True``, bypass the ``min_tvl`` filter and process **all**
+        vaults that exist in the database and are still present in the
+        bulk API listing, regardless of their current TVL.  This is
+        intended to be run periodically (e.g. once a week) to refresh
+        data for vaults that have dropped below the daily TVL threshold
+        but still have historical data worth keeping current.  The
+        ``max_vaults`` limit still applies to cap total work.
+        Ignored when ``vault_addresses`` is provided.
     :return:
         The metrics database instance.
     """
-    logger.info("Starting daily Hyperliquid vault scan (flow_backfill_days=%d)", flow_backfill_days)
+    logger.info("Starting daily Hyperliquid vault scan (flow_backfill_days=%d, full_scan=%s)", flow_backfill_days, full_scan)
 
     db = HyperliquidDailyMetricsDatabase(db_path)
 
@@ -1418,6 +1617,20 @@ def run_daily_scan(
         if missing:
             logger.warning("Requested vaults not found in bulk listing: %s", missing)
         logger.info("Selected %d vaults by address", len(filtered))
+    elif full_scan:
+        # Full scan: process all vaults that we have tracked before AND
+        # are still present in the API, regardless of current TVL.
+        # This refreshes data for vaults that dropped below the daily
+        # threshold but still have historical data worth keeping current.
+        api_addresses = {s.vault_address.lower() for s in vault_summaries}
+        tracked = db.get_all_tracked_addresses()
+        tracked_in_api = tracked & api_addresses
+        filtered = [s for s in vault_summaries if s.vault_address.lower() in tracked_in_api]
+        logger.info("Full scan: %d tracked vaults still in API (of %d tracked total)", len(filtered), len(tracked))
+
+        # Sort by TVL descending and limit
+        filtered.sort(key=lambda s: float(s.tvl), reverse=True)
+        filtered = filtered[:max_vaults]
     else:
         # Filter: TVL threshold (includes both open and closed vaults)
         filtered = [s for s in vault_summaries if float(s.tvl) >= min_tvl]
@@ -1469,6 +1682,14 @@ def run_daily_scan(
             logger.info("Updated TVL for %d unprocessed vaults from bulk API data", len(stale_updates))
 
         db.mark_vaults_disappeared(all_api_addresses)
+
+        # Tombstone vaults whose wind-down window has expired AND that are
+        # no longer in the bulk API listing.  Vaults still in the API are
+        # alive (possibly just below min_tvl or cut by max_vaults) and must
+        # not be tombstoned.
+        tombstone_count = db.tombstone_stale_vaults(all_api_addresses, wind_down_days=4)
+        if tombstone_count:
+            logger.info("Tombstoned %d vaults that fell out of the pipeline", tombstone_count)
 
     db.save()
 
