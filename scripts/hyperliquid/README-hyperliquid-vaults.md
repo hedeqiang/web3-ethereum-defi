@@ -224,6 +224,64 @@ so you can backfill as far as the vault has existed.
 After a one-time backfill, set `FLOW_BACKFILL_DAYS` back to 7 (or omit it)
 for regular daily runs to avoid unnecessary API calls.
 
+## Tombstoning stale vaults
+
+Vaults that drop below the daily TVL processing threshold ($5K) stop receiving
+new data after the 4-day wind-down window expires. Their last price row retains
+the old (higher) TVL, which can trigger downstream staleness alerts.
+
+The pipeline handles this automatically in two ways:
+
+1. **Auto-tombstoning in the daily pipeline** — `mark_vaults_disappeared()` and
+   `tombstone_stale_vaults()` run at the end of every `run_daily_scan()` call.
+   Vaults that have vanished from the bulk API listing and have stale data get a
+   tombstone row (TVL=0, data_source='tombstone') written for today.
+
+2. **Weekly full scan** — every Sunday (configurable), the pipeline bypasses the
+   TVL threshold and rescans all tracked vaults that are still in the API. This
+   prevents vaults from going stale in the first place.
+
+For one-off manual cleanup of existing stale vaults, use the interactive repair
+script:
+
+```shell
+# Show stale vaults and write tombstone rows (interactive y/n)
+poetry run python scripts/hyperliquid/tombstone-stale-vaults.py
+
+# Custom staleness threshold and TVL safety guard
+STALENESS_DAYS=14 SAFE_TVL=10000 \
+  poetry run python scripts/hyperliquid/tombstone-stale-vaults.py
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `info` | Logging level |
+| `DB_PATH` | `~/.tradingstrategy/vaults/hyperliquid-vaults.duckdb` | DuckDB path |
+| `STALENESS_DAYS` | `7` | Only consider vaults whose last data is older than this |
+| `SAFE_TVL` | `5000` | Maximum current API TVL for a vault to be eligible for tombstoning |
+
+## Weekly full scan
+
+By default, the daily pipeline only processes vaults above `MIN_TVL` ($5K).
+Once a week, it automatically rescans **all** previously tracked vaults that
+are still in the API, regardless of current TVL. This keeps data fresh for
+declining vaults and avoids the need for tombstones.
+
+```shell
+# Force a full scan on any day
+FULL_SCAN=1 LOG_LEVEL=info \
+  poetry run python scripts/hyperliquid/daily-vault-metrics.py
+
+# Change the auto-trigger day (0=Monday, 6=Sunday, default: 6)
+FULL_SCAN_WEEKDAY=3 LOG_LEVEL=info \
+  poetry run python scripts/hyperliquid/daily-vault-metrics.py
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FULL_SCAN` | *(unset)* | Set to `1` to force a full scan |
+| `FULL_SCAN_WEEKDAY` | `6` (Sunday) | Day of the week to auto-trigger full scan |
+
 ## Healing share price data
 
 The share price computation has evolved over time. If the production DuckDB
@@ -437,6 +495,8 @@ for v in data['vaults'][:5]:
 | `MAX_VAULTS` | `500` | Maximum number of vaults to process |
 | `MAX_WORKERS` | `16` | Parallel worker threads for API calls |
 | `FLOW_BACKFILL_DAYS` | `7` | Number of complete days to backfill deposit/withdrawal flow data |
+| `FULL_SCAN` | *(unset)* | Set to `1` to force a full scan of all tracked vaults regardless of TVL |
+| `FULL_SCAN_WEEKDAY` | `6` (Sunday) | Day of the week to auto-trigger full scan (0=Monday, 6=Sunday) |
 | `VAULT_DB_PATH` | `~/.tradingstrategy/vaults/vault-metadata-db.pickle` | ERC-4626 VaultDatabase pickle to merge into |
 | `PARQUET_PATH` | `~/.tradingstrategy/vaults/cleaned-vault-prices-1h.parquet` | Cleaned Parquet to merge into |
 
