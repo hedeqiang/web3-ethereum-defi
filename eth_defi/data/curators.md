@@ -54,7 +54,7 @@ Sourced from Lagoon API (`app.lagoon.finance/api/vault`) chain 1 (Ethereum).
 | Odyssey Digital AM | | |
 | SmarDex | https://smardex.io | [@SmarDex](https://x.com/SmarDex) |
 | Syntropia | https://syntropia.ai | [@syntropia_ai](https://x.com/syntropia_ai) |
-
+w
 ## Hyperliquid vault managers
 
 Active traders and asset managers running strategy vaults on [Hyperliquid](https://app.hyperliquid.xyz/vaults).
