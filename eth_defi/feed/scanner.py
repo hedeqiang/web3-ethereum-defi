@@ -129,15 +129,18 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
 
     try:
         # Phase 1: RSS sources
+        # Cap RSS workers at 2 — most RSS feeds are on medium.com which
+        # rate-limits aggressively (~30 req/min).  Higher parallelism triggers
+        # 429 Too Many Requests across the batch.
         if rss_sources:
             logger.info("Scanning %d RSS sources", len(rss_sources))
             rss_summary = collect_posts(
                 db,
                 rss_sources,
-                max_workers=config.max_workers,
+                max_workers=min(config.max_workers, 2),
                 max_posts_per_source=config.max_posts_per_source,
                 request_timeout=config.request_timeout,
-                request_delay_seconds=config.request_delay_seconds,
+                request_delay_seconds=max(config.request_delay_seconds, 2.0),
                 proxy_rotator=proxy_rotator,
                 max_proxy_rotations=config.max_proxy_rotations,
             )
