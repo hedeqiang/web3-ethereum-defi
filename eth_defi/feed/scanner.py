@@ -18,6 +18,7 @@ from eth_defi.feed.sources import (
     FEEDS_DATA_DIR,
     auto_disable_failed_linkedin_sources,
     load_post_sources,
+    mark_rss_source_dead,
     mark_rss_source_failure,
     mark_twitter_handle_unknown,
     mark_twitter_source_dead,
@@ -159,6 +160,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
             )
             _merge_summary(combined_summary, rss_summary)
             _record_rss_failures(rss_summary, rss_sources)
+            _detect_dead_rss_feeds(db, rss_sources)
 
         # Phase 2: LinkedIn sources
         if linkedin_sources:
@@ -211,6 +213,47 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
         db.close()
 
     return combined_summary
+
+
+def _detect_dead_rss_feeds(db: VaultPostDatabase, rss_sources: list) -> int:
+    """Mark RSS feeds as dead when valid but no posts published for a year.
+
+    Only considers sources that have been successfully fetched at least once
+    (``last_success_at`` is set) and whose most recent post is older than
+    365 days.
+    """
+
+    cutoff = native_datetime_utc_now() - datetime.timedelta(days=365)
+    today_str = native_datetime_utc_now().strftime("%Y-%m-%d")
+    dead_count = 0
+
+    tracked_df = db.get_tracked_sources_df()
+    if tracked_df.empty:
+        return 0
+
+    for source in rss_sources:
+        matching = tracked_df[(tracked_df["feeder_id"] == source.feeder_id) & (tracked_df["source_type"] == "rss") & (tracked_df["source_key"] == source.source_key)]
+        if matching.empty:
+            continue
+
+        row = matching.iloc[0]
+        # Only consider feeds that have been successfully fetched
+        if row["last_success_at"] is None:
+            continue
+
+        last_post = row["last_post_published_at"]
+        if last_post is not None and last_post < cutoff:
+            if mark_rss_source_dead(source.mapping_file, today_str):
+                logger.info(
+                    "Marked RSS feed %s as dead (last post: %s)",
+                    source.source_key,
+                    last_post,
+                )
+                dead_count += 1
+
+    if dead_count:
+        logger.info("Marked %d dead RSS feeds", dead_count)
+    return dead_count
 
 
 def _detect_dead_twitter_accounts(

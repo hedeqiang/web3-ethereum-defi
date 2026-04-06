@@ -50,6 +50,7 @@ _MAPPING_SCHEMA = Map(
         Optional("twitter-dead-at"): Str(),
         Optional("twitter-handle-resolved-unknown-at"): Str(),
         Optional("rss"): Str(),
+        Optional("rss-dead-at"): Str(),
         Optional("rss-failure-at"): Str(),
         Optional("rss-failure-status-code"): Int(),
         Optional("rss-failure-exception-message"): Str(),
@@ -208,6 +209,7 @@ def _load_mapping_file(mapping_file: Path) -> list[TrackedPostSource]:
     linkedin_disabled_at = parsed.get("linkedin-rss-hub-disabled-at")
     twitter_dead_at = parsed.get("twitter-dead-at")
     rss_url = parsed.get("rss")
+    rss_dead_at = parsed.get("rss-dead-at")
 
     if linkedin_company_id and linkedin_disabled_at:
         logger.debug(
@@ -233,6 +235,14 @@ def _load_mapping_file(mapping_file: Path) -> list[TrackedPostSource]:
             twitter_handle_unknown_at,
         )
         twitter_username = None
+
+    if rss_url and rss_dead_at:
+        logger.debug(
+            "RSS source disabled for %s since %s (rss-dead-at set in YAML)",
+            feeder_id,
+            rss_dead_at,
+        )
+        rss_url = None
 
     if website is not None:
         website = _normalise_http_url(website, mapping_file)
@@ -340,6 +350,26 @@ def mark_twitter_handle_unknown(yaml_path: Path, unknown_at: str) -> bool:
     if not content.endswith("\n"):
         content += "\n"
     content += f"twitter-handle-resolved-unknown-at: {unknown_at}\n"
+    yaml_path.write_text(content)
+    return True
+
+
+def mark_rss_source_dead(yaml_path: Path, dead_at: str) -> bool:
+    """Append ``rss-dead-at`` to a feeder YAML without rewriting it.
+
+    Used when an RSS feed is valid but has not published any new posts
+    for a year or more.
+
+    :param yaml_path: Path to the feeder YAML file.
+    :param dead_at: ISO date string, e.g. ``2026-04-06``.
+    :return: ``True`` when the file was updated, ``False`` when already present.
+    """
+    content = yaml_path.read_text()
+    if "rss-dead-at" in content:
+        return False
+    if not content.endswith("\n"):
+        content += "\n"
+    content += f"rss-dead-at: {dead_at}\n"
     yaml_path.write_text(content)
     return True
 
