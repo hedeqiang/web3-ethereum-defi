@@ -115,8 +115,19 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
             today_str = native_datetime_utc_now().strftime("%Y-%m-%d")
             unresolved = [s for s in twitter_sources if s.source_key not in handle_to_id]
             for source in unresolved:
-                if mark_twitter_handle_unknown(source.mapping_file, today_str):
-                    logger.info("Marked @%s as unresolvable handle", source.source_key)
+                updated = mark_twitter_handle_unknown(source.mapping_file, today_str)
+                if updated:
+                    logger.info(
+                        "Marked @%s as unresolvable handle — added twitter-handle-resolved-unknown-at to %s",
+                        source.source_key,
+                        source.mapping_file,
+                    )
+                else:
+                    logger.info(
+                        "Skipping @%s — already marked as unresolvable in %s",
+                        source.source_key,
+                        source.mapping_file,
+                    )
             twitter_sources = [s for s in twitter_sources if s.source_key in handle_to_id]
 
     # Sync X list membership (production only, change-detected)

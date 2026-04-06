@@ -139,6 +139,11 @@ def resolve_twitter_handles(
 
     Only looks up handles that are missing from the cache or stale.
     Returns a mapping of handle → user_id.
+
+    The X API ``get_users`` response may include an ``errors`` list
+    describing why specific handles could not be resolved (suspended,
+    not found, renamed, etc.).  These reasons are logged so operators
+    can take corrective action on the corresponding YAML files.
     """
 
     stale = [h for h in handles if cache.is_stale(h, max_age_days)]
@@ -146,6 +151,9 @@ def resolve_twitter_handles(
         return {h: cache.get(h).user_id for h in handles}
 
     client = tweepy.Client(bearer_token=bearer_token)
+
+    # Collect per-handle error reasons returned by the X API
+    error_reasons: dict[str, str] = {}
 
     # Batch-resolve in groups of 100 (API limit)
     for i in range(0, len(stale), 100):
@@ -159,6 +167,17 @@ def resolve_twitter_handles(
             for user in response.data:
                 cache.put(user.username, str(user.id), user.name)
 
+        # Extract per-handle error details from the API response
+        if response.errors:
+            for err in response.errors:
+                # The ``value`` field contains the username that failed
+                err_handle = err.get("value", "").lower()
+                title = err.get("title", "Unknown error")
+                detail = err.get("detail", "")
+                reason = f"{title}: {detail}" if detail else title
+                if err_handle:
+                    error_reasons[err_handle] = reason
+
     cache.save()
 
     result = {}
@@ -167,7 +186,8 @@ def resolve_twitter_handles(
         if cached:
             result[h] = cached.user_id
         else:
-            logger.warning("Could not resolve Twitter handle @%s to user ID", h)
+            reason = error_reasons.get(h.lower(), "handle not present in API response (may be suspended or deleted)")
+            logger.warning("Could not resolve Twitter handle @%s to user ID — %s", h, reason)
     return result
 
 
