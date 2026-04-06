@@ -85,7 +85,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
     7. Return summary.
     """
 
-    all_sources = load_post_sources(mappings_dir=config.mappings_dir)
+    all_sources, feeders_skipped = load_post_sources(mappings_dir=config.mappings_dir)
 
     # Split sources by type
     rss_sources = [s for s in all_sources if s.source_type == "rss"]
@@ -139,7 +139,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
 
     proxy_rotator = fetch_feed_proxy_rotator()
     db = VaultPostDatabase(config.db_path)
-    combined_summary = CollectorRunSummary(source_results=[])
+    combined_summary = CollectorRunSummary(source_results=[], feeders_skipped=feeders_skipped)
 
     try:
         # Phase 1: RSS sources

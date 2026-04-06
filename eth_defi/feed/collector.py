@@ -102,6 +102,8 @@ class CollectorRunSummary:
     sources_succeeded: int = 0
     #: Number of sources that failed or were skipped with an error.
     sources_failed: int = 0
+    #: Number of feeder YAML files where all sources were disabled.
+    feeders_skipped: int = 0
     #: Total number of parsed posts returned by all successful source reads.
     posts_fetched: int = 0
     #: Number of newly inserted posts after deduplication.

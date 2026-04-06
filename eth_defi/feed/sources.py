@@ -248,7 +248,9 @@ def _load_mapping_file(mapping_file: Path) -> list[TrackedPostSource]:
         website = _normalise_http_url(website, mapping_file)
 
     if not any((twitter_username, linkedin_company_id, rss_url)):
-        raise ValueError(f"At least one of twitter, linkedin or rss must be set in {mapping_file}")
+        # All sources have been disabled (dead/unknown/disabled flags set) — skip this feeder
+        logger.debug("All sources disabled for %s in %s, skipping", feeder_id, mapping_file)
+        return []
 
     sources = []
 
@@ -444,8 +446,12 @@ def auto_disable_failed_linkedin_sources(
     return count
 
 
-def load_post_sources(mappings_dir: Path = FEEDS_DATA_DIR) -> list[TrackedPostSource]:
-    """Load and validate all feed source mappings."""
+def load_post_sources(mappings_dir: Path = FEEDS_DATA_DIR) -> tuple[list[TrackedPostSource], int]:
+    """Load and validate all feed source mappings.
+
+    :return: Tuple of (sources, feeders_skipped) where feeders_skipped is the
+        number of YAML files where all sources were disabled.
+    """
 
     mappings_dir = mappings_dir.expanduser().resolve()
     if not mappings_dir.exists():
@@ -453,9 +459,13 @@ def load_post_sources(mappings_dir: Path = FEEDS_DATA_DIR) -> list[TrackedPostSo
 
     entries: list[TrackedPostSource] = []
     seen: dict[tuple[str, str, str, str], Path] = {}
+    feeders_skipped = 0
 
     for mapping_file in _iter_mapping_files(mappings_dir):
-        for entry in _load_mapping_file(mapping_file):
+        file_entries = _load_mapping_file(mapping_file)
+        if not file_entries:
+            feeders_skipped += 1
+        for entry in file_entries:
             logical_key = entry.get_logical_key()
             if logical_key in seen:
                 other_file = seen[logical_key]
@@ -465,4 +475,4 @@ def load_post_sources(mappings_dir: Path = FEEDS_DATA_DIR) -> list[TrackedPostSo
             seen[logical_key] = mapping_file
             entries.append(entry)
 
-    return entries
+    return entries, feeders_skipped

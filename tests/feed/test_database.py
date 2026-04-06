@@ -18,7 +18,8 @@ def test_real_gauntlet_feeder_sources_are_stored_in_database(tmp_path: Path) -> 
     try:
         # 1. Load the real Gauntlet feeder YAML from the repository feed folder.
         data_dir = Path(__file__).resolve().parents[2] / "eth_defi" / "data" / "feeds"
-        sources = [source for source in load_post_sources(data_dir) if source.feeder_id == "gauntlet"]
+        all_sources, _ = load_post_sources(data_dir)
+        sources = [source for source in all_sources if source.feeder_id == "gauntlet"]
 
         # 2. Upsert all resulting tracked sources into an empty DuckDB database.
         db.upsert_tracked_sources(sources)
