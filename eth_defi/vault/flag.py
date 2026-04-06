@@ -424,6 +424,8 @@ VAULT_FLAGS_AND_NOTES: dict[str, tuple[VaultFlag | None, str]] = {
     # Vault Shares (vUSDC) on Ethereum - unidentified protocol
     # The deployer of this contract was interacting with suspicious token on Ethereum
     "0xaf68a0f0d2d4f82e671578ae6dd6a99de0e84cc6": (VaultFlag.malicious, MALICIOUS_VAULT),
+    # Borrowable USDC Deposit, SiloId: 138
+    "0x20abecf84ce707c3650b4e8afcf7ea1e22bbcd0c": (VaultFlag.illiquid, XUSD_MESSAGE),
 }
 
 for addr in VAULT_FLAGS_AND_NOTES.keys():

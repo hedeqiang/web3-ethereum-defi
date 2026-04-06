@@ -1,0 +1,6 @@
+feeder-id: bvusd
+name: BitVault USD
+role: stablecoin
+website: https://bitvault.finance/
+twitter: BitVaultFinance
+# rss: not found (Next.js blog, no RSS endpoint)
