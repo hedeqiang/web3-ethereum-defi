@@ -21,6 +21,7 @@ from eth_defi.compat import native_datetime_utc_fromtimestamp, native_datetime_u
 from eth_defi.event_reader.webshare import ProxyRotator, load_proxy_rotator
 from eth_defi.feed.database import CollectedPost, VaultPostDatabase
 from eth_defi.feed.sources import TrackedPostSource
+from eth_defi.feed.twitter_api import TwitterUserCache, XApiError, fetch_user_tweets
 
 
 logger = logging.getLogger(__name__)
@@ -438,7 +439,7 @@ def collect_posts_for_source(
     proxy_rotator: ProxyRotator | None = None,
     max_proxy_rotations: int = 3,
     twitter_bearer_token: str | None = None,
-    twitter_user_cache: "TwitterUserCache | None" = None,
+    twitter_user_cache: TwitterUserCache | None = None,
 ) -> list[CollectedPost]:
     """Collect posts for one tracked source."""
 
@@ -455,8 +456,6 @@ def collect_posts_for_source(
         # Try X API v2 first when bearer token is configured
         if twitter_bearer_token and twitter_user_cache:
             try:
-                from eth_defi.feed.twitter_api import XApiError, fetch_user_tweets
-
                 cached = twitter_user_cache.get(source.source_key)
                 if cached:
                     posts = fetch_user_tweets(
@@ -523,7 +522,7 @@ def _collect_posts_for_source_worker(
     proxy_rotator: ProxyRotator | None,
     max_proxy_rotations: int,
     twitter_bearer_token: str | None = None,
-    twitter_user_cache: "TwitterUserCache | None" = None,
+    twitter_user_cache: TwitterUserCache | None = None,
 ) -> tuple[TrackedPostSource, list[CollectedPost] | None, CollectedSourceResult]:
     """Collect one source in a worker thread and return structured status."""
 
@@ -621,7 +620,7 @@ def collect_posts(
     proxy_rotator: ProxyRotator | None = None,
     max_proxy_rotations: int = 3,
     twitter_bearer_token: str | None = None,
-    twitter_user_cache: "TwitterUserCache | None" = None,
+    twitter_user_cache: TwitterUserCache | None = None,
 ) -> CollectorRunSummary:
     """Collect posts for all configured sources and persist them in DuckDB."""
 

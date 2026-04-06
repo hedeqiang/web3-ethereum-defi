@@ -9,19 +9,27 @@ List membership writes require full OAuth 1.0a credentials.
 
 import datetime
 import hashlib
+import html
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 import tweepy
 
 from eth_defi.compat import native_datetime_utc_now
-from eth_defi.feed.collector import _normalise_whitespace
-from eth_defi.feed.database import CollectedPost
+from eth_defi.feed.database import CollectedPost, VaultPostDatabase
 
 
 logger = logging.getLogger(__name__)
+
+
+def _normalise_whitespace(text: str) -> str:
+    """Collapse whitespace and strip simple HTML markup."""
+
+    without_tags = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", html.unescape(without_tags)).strip()
 
 
 #: Default path for the Twitter user metadata cache.
@@ -330,7 +338,7 @@ def sync_x_list_members(
     access_token_secret: str,
     user_cache: TwitterUserCache,
     bearer_token: str,
-    db: "VaultPostDatabase",
+    db: VaultPostDatabase,
 ) -> int:
     """Sync X list membership with the provided Twitter handles.
 
@@ -339,8 +347,6 @@ def sync_x_list_members(
 
     Requires full OAuth 1.0a credentials for list write operations.
     """
-
-    from eth_defi.feed.database import VaultPostDatabase
 
     current_hash = compute_handles_hash(twitter_handles)
     stored_hash = db.get_sync_state("twitter_handles_hash")
