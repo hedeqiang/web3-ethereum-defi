@@ -157,6 +157,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                 request_delay_seconds=max(config.request_delay_seconds, 2.0),
                 proxy_rotator=proxy_rotator,
                 max_proxy_rotations=config.max_proxy_rotations,
+                label="RSS",
             )
             _merge_summary(combined_summary, rss_summary)
             _record_rss_failures(rss_summary, rss_sources)
@@ -174,6 +175,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                 request_delay_seconds=config.request_delay_seconds,
                 proxy_rotator=proxy_rotator,
                 max_proxy_rotations=config.max_proxy_rotations,
+                label="LinkedIn",
             )
             _merge_summary(combined_summary, linkedin_summary)
 
@@ -195,6 +197,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                 max_proxy_rotations=config.max_proxy_rotations,
                 twitter_bearer_token=config.twitter_bearer_token,
                 twitter_user_cache=twitter_user_cache,
+                label="Twitter",
             )
             _merge_summary(combined_summary, twitter_summary)
 
