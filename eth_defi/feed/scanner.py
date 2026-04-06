@@ -269,13 +269,11 @@ def _record_rss_failures(summary: CollectorRunSummary, rss_sources: list) -> Non
             continue
 
         # Extract HTTP status code from error string if present
-        status_code = "unknown"
+        status_code = None
         error = result.error or ""
         match = re.search(r"(\d{3}) (?:Client|Server) Error", error)
         if match:
-            status_code = match.group(1)
-        elif "parse" in error.lower():
-            status_code = "parse_error"
+            status_code = int(match.group(1))
 
         mark_rss_source_failure(yaml_path, today_str, status_code)
         logger.info("Recorded RSS failure for %s: %s", result.feeder_id, status_code)
