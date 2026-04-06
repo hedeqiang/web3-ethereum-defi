@@ -145,6 +145,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                 max_proxy_rotations=config.max_proxy_rotations,
             )
             _merge_summary(combined_summary, rss_summary)
+            _record_rss_failures(rss_summary, rss_sources)
 
         # Phase 2: LinkedIn sources
         if linkedin_sources:
@@ -245,6 +246,39 @@ def _detect_dead_twitter_accounts(
                 dead_count += 1
 
     return dead_count
+
+
+def _record_rss_failures(summary: CollectorRunSummary, rss_sources: list) -> None:
+    """Stamp ``rss-failure-at`` and ``rss-failure-status-code`` in YAML for failed RSS sources."""
+
+    import re
+
+    from eth_defi.feed.sources import mark_rss_source_failure
+
+    results = summary.source_results or []
+    today_str = native_datetime_utc_now().strftime("%Y-%m-%d")
+
+    # Build feeder_id → mapping_file lookup from sources
+    yaml_lookup: dict[str, "Path"] = {s.feeder_id: s.mapping_file for s in rss_sources if s.source_type == "rss"}
+
+    for result in results:
+        if result.source_type != "rss" or result.status != "failed":
+            continue
+        yaml_path = yaml_lookup.get(result.feeder_id)
+        if yaml_path is None:
+            continue
+
+        # Extract HTTP status code from error string if present
+        status_code = "unknown"
+        error = result.error or ""
+        match = re.search(r"(\d{3}) (?:Client|Server) Error", error)
+        if match:
+            status_code = match.group(1)
+        elif "parse" in error.lower():
+            status_code = "parse_error"
+
+        mark_rss_source_failure(yaml_path, today_str, status_code)
+        logger.info("Recorded RSS failure for %s: %s", result.feeder_id, status_code)
 
 
 def _merge_summary(target: CollectorRunSummary, source: CollectorRunSummary) -> None:

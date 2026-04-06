@@ -49,6 +49,8 @@ _MAPPING_SCHEMA = Map(
         Optional("linkedin-rss-hub-disabled-at"): Str(),
         Optional("twitter-dead-at"): Str(),
         Optional("rss"): Str(),
+        Optional("rss-failure-at"): Str(),
+        Optional("rss-failure-status-code"): Str(),
     }
 )
 
@@ -307,6 +309,29 @@ def mark_twitter_source_dead(yaml_path: Path, dead_at: str) -> bool:
     if not content.endswith("\n"):
         content += "\n"
     content += f"twitter-dead-at: {dead_at}\n"
+    yaml_path.write_text(content)
+    return True
+
+
+def mark_rss_source_failure(yaml_path: Path, failure_at: str, status_code: int | str) -> bool:
+    """Stamp ``rss-failure-at`` and ``rss-failure-status-code`` on a feeder YAML.
+
+    Records the most recent RSS failure so operators can see which feeds
+    are broken.  Overwrites any previous failure fields.
+
+    :param yaml_path: Path to the feeder YAML file.
+    :param failure_at: ISO date string, e.g. ``2026-04-06``.
+    :param status_code: HTTP status code or error description.
+    :return: ``True`` when the file was updated.
+    """
+    content = yaml_path.read_text()
+    # Remove existing failure fields so we always write the latest
+    lines = [line for line in content.splitlines(keepends=True) if not line.startswith("rss-failure-at:") and not line.startswith("rss-failure-status-code:")]
+    content = "".join(lines)
+    if not content.endswith("\n"):
+        content += "\n"
+    content += f"rss-failure-at: {failure_at}\n"
+    content += f"rss-failure-status-code: {status_code}\n"
     yaml_path.write_text(content)
     return True
 
