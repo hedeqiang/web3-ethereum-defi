@@ -28,6 +28,10 @@ logger = logging.getLogger(__name__)
 
 _RETRYABLE_STATUS_CODES = {403, 429, 502, 503, 504}
 
+#: Status codes that indicate the URL itself is broken, not the proxy.
+#: These should fail immediately without proxy rotation or retry.
+_PERMANENT_FAILURE_STATUS_CODES = {404, 410}
+
 
 class AllBridgesFailedError(RuntimeError):
     """Raised when every bridge URL for a social feed source fails.
@@ -382,6 +386,10 @@ def _fetch_feed_content(
                 headers={"User-Agent": "web3-ethereum-defi/vault-post-database"},
                 proxies=_build_proxy_dict(proxy_rotator),
             )
+            # 404/410 mean the URL itself is gone — no proxy will fix that
+            if response.status_code in _PERMANENT_FAILURE_STATUS_CODES:
+                response.raise_for_status()
+
             if proxy_rotator is not None and response.status_code in _RETRYABLE_STATUS_CODES and rotations < max_proxy_rotations:
                 rotations += 1
                 proxy_rotator.rotate(failure_reason=f"HTTP {response.status_code}")
