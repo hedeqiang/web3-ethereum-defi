@@ -77,6 +77,7 @@ def _print_dashboard(summary) -> None:
         ["Sources loaded", summary.sources_loaded],
         ["Sources succeeded", summary.sources_succeeded],
         ["Sources failed", summary.sources_failed],
+        ["Feeders all-skipped", summary.feeders_skipped],
         ["Posts fetched", summary.posts_fetched],
         ["Posts inserted", summary.posts_inserted],
     ]
