@@ -25,6 +25,7 @@ import os
 from pathlib import Path
 
 import boto3
+from botocore.exceptions import ClientError
 from tqdm_loggable.auto import tqdm
 
 from eth_defi.utils import setup_console_logging
@@ -94,7 +95,7 @@ def upload_files_to_r2(
                         s3_key,
                         Callback=upload_callback,
                     )
-                except Exception as e:
+                except ClientError as e:
                     raise RuntimeError(f"Failed to upload {s3_key} to bucket {bucket_name} (endpoint: {endpoint_url}, access_key_id: {access_key_id}): {e}") from e
 
         if public_url:

@@ -164,6 +164,7 @@ def main():
     # doesn't discard connections under concurrent thread load.
     import boto3
     from botocore.config import Config
+    from botocore.exceptions import ClientError
 
     s3_client = boto3.client(
         "s3",
@@ -184,7 +185,7 @@ def main():
                 ContentType=render_data.content_type,
                 ContentEncoding="gzip",
             )
-        except Exception as e:
+        except ClientError as e:
             raise RuntimeError(f"Failed to upload {object_name} to bucket {bucket_name} (endpoint: {endpoint_url}, access_key_id: {access_key_id}): {e}") from e
 
     # Upload in parallel using threads (I/O bound)

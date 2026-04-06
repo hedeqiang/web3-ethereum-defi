@@ -239,6 +239,7 @@ def upload_to_r2_compressed(
     """
 
     import boto3
+    from botocore.exceptions import ClientError
 
     s3_client = boto3.client(
         "s3",
@@ -256,5 +257,5 @@ def upload_to_r2_compressed(
             ContentType=content_type,
             ContentEncoding="gzip",
         )
-    except Exception as e:
+    except ClientError as e:
         raise RuntimeError(f"Failed to upload {object_name} to bucket {bucket_name} (endpoint: {endpoint_url}, access_key_id: {access_key_id}): {e}") from e
