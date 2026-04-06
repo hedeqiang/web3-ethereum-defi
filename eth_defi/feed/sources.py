@@ -403,9 +403,10 @@ def mark_rss_source_failure(
     if status_code is not None:
         content += f"rss-failure-status-code: {status_code}\n"
     if exception_message is not None:
-        # Truncate and sanitise for YAML single-line value
-        safe_msg = exception_message.replace("\n", " ").strip()[:200]
-        content += f"rss-failure-exception-message: {safe_msg}\n"
+        # Truncate, sanitise, and quote for YAML — exception messages contain
+        # colons and other YAML-breaking characters that corrupt the file.
+        safe_msg = exception_message.replace("\n", " ").replace('"', "'").strip()[:200]
+        content += f'rss-failure-exception-message: "{safe_msg}"\n'
     yaml_path.write_text(content)
     return True
 
@@ -462,7 +463,12 @@ def load_post_sources(mappings_dir: Path = FEEDS_DATA_DIR) -> tuple[list[Tracked
     feeders_skipped = 0
 
     for mapping_file in _iter_mapping_files(mappings_dir):
-        file_entries = _load_mapping_file(mapping_file)
+        try:
+            file_entries = _load_mapping_file(mapping_file)
+        except Exception as e:
+            logger.error("Failed to parse feeder YAML %s: %s", mapping_file, e)
+            feeders_skipped += 1
+            continue
         if not file_entries:
             feeders_skipped += 1
         for entry in file_entries:
