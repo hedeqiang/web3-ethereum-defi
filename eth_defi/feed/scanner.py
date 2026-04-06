@@ -7,13 +7,22 @@ without going through the script entry point.
 
 import datetime
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from eth_defi.compat import native_datetime_utc_now
 from eth_defi.feed.collector import CollectorRunSummary, collect_posts, fetch_feed_proxy_rotator
 from eth_defi.feed.database import DEFAULT_VAULT_POST_DATABASE, VaultPostDatabase
-from eth_defi.feed.sources import FEEDS_DATA_DIR, auto_disable_failed_linkedin_sources, load_post_sources
+from eth_defi.feed.sources import (
+    FEEDS_DATA_DIR,
+    auto_disable_failed_linkedin_sources,
+    load_post_sources,
+    mark_rss_source_failure,
+    mark_twitter_handle_unknown,
+    mark_twitter_source_dead,
+)
+from eth_defi.feed.twitter_api import TwitterUserCache, resolve_twitter_handles, sync_x_list_members
 
 
 logger = logging.getLogger(__name__)
@@ -91,8 +100,6 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
     # Set up Twitter user cache
     twitter_user_cache = None
     if config.twitter_bearer_token:
-        from eth_defi.feed.twitter_api import TwitterUserCache, resolve_twitter_handles
-
         cache_path = config.twitter_user_cache_path
         twitter_user_cache = TwitterUserCache(cache_path)
 
@@ -102,8 +109,6 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
             handle_to_id = resolve_twitter_handles(handles, config.twitter_bearer_token, twitter_user_cache)
 
             # Stamp unresolvable handles and remove them from the scan
-            from eth_defi.feed.sources import mark_twitter_handle_unknown
-
             today_str = native_datetime_utc_now().strftime("%Y-%m-%d")
             unresolved = [s for s in twitter_sources if s.source_key not in handle_to_id]
             for source in unresolved:
@@ -113,8 +118,6 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
 
     # Sync X list membership (production only, change-detected)
     if config.sync_x_list and config.x_list_id and config.twitter_consumer_key:
-        from eth_defi.feed.twitter_api import sync_x_list_members
-
         handles = [s.source_key for s in twitter_sources]
         db_for_sync = VaultPostDatabase(config.db_path)
         try:
@@ -224,8 +227,6 @@ def _detect_dead_twitter_accounts(
     feeder YAML so future loads skip it.
     """
 
-    from eth_defi.feed.sources import mark_twitter_source_dead
-
     cutoff = native_datetime_utc_now() - datetime.timedelta(days=death_detection_days)
     today_str = native_datetime_utc_now().strftime("%Y-%m-%d")
     dead_count = 0
@@ -260,10 +261,6 @@ def _detect_dead_twitter_accounts(
 
 def _record_rss_failures(summary: CollectorRunSummary, rss_sources: list) -> None:
     """Stamp ``rss-failure-at`` and ``rss-failure-status-code`` in YAML for failed RSS sources."""
-
-    import re
-
-    from eth_defi.feed.sources import mark_rss_source_failure
 
     results = summary.source_results or []
     today_str = native_datetime_utc_now().strftime("%Y-%m-%d")
