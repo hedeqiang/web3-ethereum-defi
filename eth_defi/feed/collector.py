@@ -528,6 +528,11 @@ def _collect_posts_for_source_worker(
 
     checked_rotator = proxy_rotator.clone_for_worker(start_index=idx) if proxy_rotator is not None else None
 
+    # Rotate proxy before each source so consecutive requests to the same
+    # domain (e.g. medium.com) come from different IPs and avoid rate limits.
+    if checked_rotator is not None:
+        checked_rotator.rotate(failure_reason=None)
+
     if request_delay_seconds > 0:
         time.sleep(request_delay_seconds)
 
