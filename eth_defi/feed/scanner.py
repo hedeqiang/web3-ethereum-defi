@@ -275,7 +275,7 @@ def _record_rss_failures(summary: CollectorRunSummary, rss_sources: list) -> Non
         if match:
             status_code = int(match.group(1))
 
-        mark_rss_source_failure(yaml_path, today_str, status_code)
+        mark_rss_source_failure(yaml_path, today_str, status_code, exception_message=error or None)
         logger.info("Recorded RSS failure for %s: %s", result.feeder_id, status_code)
 
 
