@@ -176,13 +176,16 @@ def main():
 
     def _upload_row(render_data: RenderData):
         object_name = f"sparkline-90d-{render_data.vault_id}.{render_data.extension}"
-        s3_client.put_object(
-            Bucket=bucket_name,
-            Key=object_name,
-            Body=gzip.compress(render_data.svg_bytes),
-            ContentType=render_data.content_type,
-            ContentEncoding="gzip",
-        )
+        try:
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=object_name,
+                Body=gzip.compress(render_data.svg_bytes),
+                ContentType=render_data.content_type,
+                ContentEncoding="gzip",
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to upload {object_name} to bucket {bucket_name} (endpoint: {endpoint_url}, access_key_id: {access_key_id}): {e}") from e
 
     # Upload in parallel using threads (I/O bound)
     upload_tasks = (delayed(_upload_row)(row) for row in render_data)

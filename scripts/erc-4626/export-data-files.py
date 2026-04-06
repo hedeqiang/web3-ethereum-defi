@@ -87,12 +87,15 @@ def upload_files_to_r2(
                 def upload_callback(bytes_amount):
                     pbar.update(bytes_amount)
 
-                s3_client.upload_fileobj(
-                    f,
-                    bucket_name,
-                    s3_key,
-                    Callback=upload_callback,
-                )
+                try:
+                    s3_client.upload_fileobj(
+                        f,
+                        bucket_name,
+                        s3_key,
+                        Callback=upload_callback,
+                    )
+                except Exception as e:
+                    raise RuntimeError(f"Failed to upload {s3_key} to bucket {bucket_name} (endpoint: {endpoint_url}, access_key_id: {access_key_id}): {e}") from e
 
         if public_url:
             final_url = f"{public_url.rstrip('/')}/{s3_key}"
