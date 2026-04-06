@@ -15,7 +15,7 @@ from urllib.parse import urlparse, urlunparse
 if TYPE_CHECKING:
     from eth_defi.feed.collector import CollectorRunSummary
 
-from strictyaml import Map, Optional, Str, load
+from strictyaml import Int, Map, Optional, Str, load
 
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,9 @@ _MAPPING_SCHEMA = Map(
         Optional("linkedin-rss-hub-disabled-at"): Str(),
         Optional("twitter-dead-at"): Str(),
         Optional("rss"): Str(),
+        Optional("rss-failure-at"): Str(),
+        Optional("rss-failure-status-code"): Int(),
+        Optional("rss-failure-exception-message"): Str(),
     }
 )
 
@@ -307,6 +310,46 @@ def mark_twitter_source_dead(yaml_path: Path, dead_at: str) -> bool:
     if not content.endswith("\n"):
         content += "\n"
     content += f"twitter-dead-at: {dead_at}\n"
+    yaml_path.write_text(content)
+    return True
+
+
+def mark_rss_source_failure(
+    yaml_path: Path,
+    failure_at: str,
+    status_code: int | None = None,
+    exception_message: str | None = None,
+) -> bool:
+    """Stamp RSS failure fields on a feeder YAML.
+
+    Records the most recent RSS failure so operators can see which feeds
+    are broken.  Overwrites any previous failure fields.
+
+    :param yaml_path: Path to the feeder YAML file.
+    :param failure_at: ISO date string, e.g. ``2026-04-06``.
+    :param status_code: HTTP status code, or ``None`` for non-HTTP failures.
+    :param exception_message: Exception message or HTTP status text.
+    :return: ``True`` when the file was updated.
+    """
+    content = yaml_path.read_text()
+    # Remove existing failure fields so we always write the latest
+    lines = [
+        line
+        for line in content.splitlines(keepends=True)
+        if not line.startswith("rss-failure-at:")
+        and not line.startswith("rss-failure-status-code:")
+        and not line.startswith("rss-failure-exception-message:")
+    ]
+    content = "".join(lines)
+    if not content.endswith("\n"):
+        content += "\n"
+    content += f"rss-failure-at: {failure_at}\n"
+    if status_code is not None:
+        content += f"rss-failure-status-code: {status_code}\n"
+    if exception_message is not None:
+        # Truncate and sanitise for YAML single-line value
+        safe_msg = exception_message.replace("\n", " ").strip()[:200]
+        content += f"rss-failure-exception-message: {safe_msg}\n"
     yaml_path.write_text(content)
     return True
 

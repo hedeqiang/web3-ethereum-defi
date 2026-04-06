@@ -93,6 +93,15 @@ class VaultPostDatabase:
         """)
         self.con.execute("ALTER TABLE tracked_sources ADD COLUMN IF NOT EXISTS website VARCHAR")
 
+        # Sync the sequence past any existing rows so nextval() never collides
+        # with an existing primary key.  This guards against sequence state loss
+        # across container rebuilds while the database file persists on a volume.
+        max_id = self.con.execute("SELECT COALESCE(MAX(source_id), 0) FROM tracked_sources").fetchone()[0]
+        if max_id > 0:
+            # Advance the sequence past the current max by dropping and recreating
+            self.con.execute("DROP SEQUENCE IF EXISTS tracked_sources_id_seq")
+            self.con.execute(f"CREATE SEQUENCE tracked_sources_id_seq START {max_id + 1}")
+
         self.con.execute("""
             CREATE TABLE IF NOT EXISTS posts (
                 source_id BIGINT NOT NULL,
