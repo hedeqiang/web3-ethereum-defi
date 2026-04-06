@@ -528,10 +528,11 @@ def _collect_posts_for_source_worker(
 ) -> tuple[TrackedPostSource, list[CollectedPost] | None, CollectedSourceResult]:
     """Collect one source in a worker thread and return structured status."""
 
-    checked_rotator = proxy_rotator.clone_for_worker(start_index=idx) if proxy_rotator is not None else None
-
-    # Rotate proxy before each source so consecutive requests to the same
-    # domain (e.g. medium.com) come from different IPs and avoid rate limits.
+    # Use the shared proxy rotator directly instead of cloning per-source.
+    # rotate() is thread-safe, so each worker call advances to the next proxy
+    # and consecutive requests to the same domain (e.g. medium.com) come from
+    # different IPs.  Cloning per-source resets the index and causes proxy reuse.
+    checked_rotator = proxy_rotator
     if checked_rotator is not None:
         checked_rotator.rotate(failure_reason=None)
 
@@ -628,6 +629,7 @@ def collect_posts(
     max_proxy_rotations: int = 3,
     twitter_bearer_token: str | None = None,
     twitter_user_cache: TwitterUserCache | None = None,
+    label: str = "",
 ) -> CollectorRunSummary:
     """Collect posts for all configured sources and persist them in DuckDB."""
 
@@ -637,7 +639,8 @@ def collect_posts(
     twitter_url_templates = list(twitter_url_templates if twitter_url_templates is not None else DEFAULT_TWITTER_URL_TEMPLATES)
     linkedin_url_templates = list(linkedin_url_templates if linkedin_url_templates is not None else DEFAULT_LINKEDIN_URL_TEMPLATES)
     worker_count = max(1, min(max_workers, len(sources) or 1))
-    desc = f"Collecting {len(sources)} feed sources using {worker_count} workers"
+    type_label = f" {label}" if label else ""
+    desc = f"Collecting {len(sources)}{type_label} feed sources using {worker_count} workers"
     worker_processor = Parallel(n_jobs=worker_count, backend="threading")
 
     with tqdm(total=len(sources), desc=desc) as progress_bar, _tqdm_joblib_progress(progress_bar):
