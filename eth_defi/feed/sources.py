@@ -48,6 +48,7 @@ _MAPPING_SCHEMA = Map(
         Optional("linkedin"): Str(),
         Optional("linkedin-rss-hub-disabled-at"): Str(),
         Optional("twitter-dead-at"): Str(),
+        Optional("twitter-handle-resolved-unknown-at"): Str(),
         Optional("rss"): Str(),
         Optional("rss-failure-at"): Str(),
         Optional("rss-failure-status-code"): Int(),
@@ -224,6 +225,15 @@ def _load_mapping_file(mapping_file: Path) -> list[TrackedPostSource]:
         )
         twitter_username = None
 
+    twitter_handle_unknown_at = parsed.get("twitter-handle-resolved-unknown-at")
+    if twitter_username and twitter_handle_unknown_at:
+        logger.debug(
+            "Twitter handle unresolvable for %s since %s (twitter-handle-resolved-unknown-at set in YAML)",
+            feeder_id,
+            twitter_handle_unknown_at,
+        )
+        twitter_username = None
+
     if website is not None:
         website = _normalise_http_url(website, mapping_file)
 
@@ -314,6 +324,26 @@ def mark_twitter_source_dead(yaml_path: Path, dead_at: str) -> bool:
     return True
 
 
+def mark_twitter_handle_unknown(yaml_path: Path, unknown_at: str) -> bool:
+    """Append ``twitter-handle-resolved-unknown-at`` to a feeder YAML.
+
+    Used when the X API cannot resolve a Twitter handle to a user ID,
+    typically because the account has been suspended, deleted, or renamed.
+
+    :param yaml_path: Path to the feeder YAML file.
+    :param unknown_at: ISO date string, e.g. ``2026-04-06``.
+    :return: ``True`` when the file was updated, ``False`` when already present.
+    """
+    content = yaml_path.read_text()
+    if "twitter-handle-resolved-unknown-at" in content:
+        return False
+    if not content.endswith("\n"):
+        content += "\n"
+    content += f"twitter-handle-resolved-unknown-at: {unknown_at}\n"
+    yaml_path.write_text(content)
+    return True
+
+
 def mark_rss_source_failure(
     yaml_path: Path,
     failure_at: str,
@@ -333,13 +363,7 @@ def mark_rss_source_failure(
     """
     content = yaml_path.read_text()
     # Remove existing failure fields so we always write the latest
-    lines = [
-        line
-        for line in content.splitlines(keepends=True)
-        if not line.startswith("rss-failure-at:")
-        and not line.startswith("rss-failure-status-code:")
-        and not line.startswith("rss-failure-exception-message:")
-    ]
+    lines = [line for line in content.splitlines(keepends=True) if not line.startswith("rss-failure-at:") and not line.startswith("rss-failure-status-code:") and not line.startswith("rss-failure-exception-message:")]
     content = "".join(lines)
     if not content.endswith("\n"):
         content += "\n"

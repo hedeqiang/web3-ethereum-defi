@@ -99,7 +99,17 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
         # Pre-resolve handles for Twitter sources so the cache is warm
         handles = [s.source_key for s in twitter_sources]
         if handles:
-            resolve_twitter_handles(handles, config.twitter_bearer_token, twitter_user_cache)
+            handle_to_id = resolve_twitter_handles(handles, config.twitter_bearer_token, twitter_user_cache)
+
+            # Stamp unresolvable handles and remove them from the scan
+            from eth_defi.feed.sources import mark_twitter_handle_unknown
+
+            today_str = native_datetime_utc_now().strftime("%Y-%m-%d")
+            unresolved = [s for s in twitter_sources if s.source_key not in handle_to_id]
+            for source in unresolved:
+                if mark_twitter_handle_unknown(source.mapping_file, today_str):
+                    logger.info("Marked @%s as unresolvable handle", source.source_key)
+            twitter_sources = [s for s in twitter_sources if s.source_key in handle_to_id]
 
     # Sync X list membership (production only, change-detected)
     if config.sync_x_list and config.x_list_id and config.twitter_consumer_key:
