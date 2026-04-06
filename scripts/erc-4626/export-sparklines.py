@@ -190,7 +190,7 @@ def main():
 
     # Upload in parallel using threads (I/O bound)
     upload_tasks = (delayed(_upload_row)(row) for row in render_data)
-    Parallel(n_jobs=max_workers, prefer="threads")(tqdm(upload_tasks, total=len(render_data), desc="Uploading sparklines to R2"))
+    Parallel(n_jobs=max_workers, prefer="threads")(tqdm(upload_tasks, total=len(render_data), desc=f"Uploading sparklines to R2 bucket {bucket_name}"))
 
     print("Sparkline export complete")
 

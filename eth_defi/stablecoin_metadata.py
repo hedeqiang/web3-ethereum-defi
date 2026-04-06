@@ -180,7 +180,6 @@ from typing import TypedDict
 
 from strictyaml import load
 
-
 logger = logging.getLogger(__name__)
 
 
