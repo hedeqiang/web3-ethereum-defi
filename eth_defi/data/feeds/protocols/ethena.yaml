@@ -5,3 +5,6 @@ website: https://ethena.fi/
 twitter: ethena_labs
 linkedin: ethena-labs
 rss: https://ethena.fi/blog/feed
+twitter-handle-resolved-unknown-at: 2026-04-06
+rss-failure-at: 2026-04-06
+rss-failure-exception-message: "Feed parse failed for https://ethena.fi/blog/feed: <unknown>:2:50840: not well-formed (invalid token)"

@@ -5,3 +5,5 @@ website: https://www.angle.money/
 twitter: AngleProtocol
 linkedin: angle-labs
 rss: https://blog.angle.money/rss/
+rss-failure-at: 2026-04-06
+rss-failure-exception-message: "HTTPSConnectionPool(host='blog.angle.money', port=443): Max retries exceeded with url: /rss/ (Caused by NameResolutionError('HTTPSConnection(host='blog.angle.money', port=443): Failed to resolve 'blog"
