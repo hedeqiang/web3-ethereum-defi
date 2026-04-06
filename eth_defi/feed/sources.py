@@ -248,7 +248,9 @@ def _load_mapping_file(mapping_file: Path) -> list[TrackedPostSource]:
         website = _normalise_http_url(website, mapping_file)
 
     if not any((twitter_username, linkedin_company_id, rss_url)):
-        raise ValueError(f"At least one of twitter, linkedin or rss must be set in {mapping_file}")
+        # All sources have been disabled (dead/unknown/disabled flags set) — skip this feeder
+        logger.debug("All sources disabled for %s in %s, skipping", feeder_id, mapping_file)
+        return []
 
     sources = []
 
