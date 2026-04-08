@@ -22,9 +22,10 @@ from eth_defi.hyperliquid.trade_history_db import HyperliquidTradeHistoryDatabas
 #: Growi HF vault — moderately active, used in existing test fixtures
 VAULT_ADDRESS = "0x1e37a337ed460039d1b15bd3bc489de789768d5e"
 
-#: Short time range for faster tests
-TEST_START = datetime.datetime(2025, 12, 7)
-TEST_END = datetime.datetime(2025, 12, 14)
+#: Short time range for faster tests — must be recent enough
+#: that Hyperliquid API still returns fills (old data is purged).
+TEST_END = datetime.datetime.now(datetime.UTC).replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None) - datetime.timedelta(days=1)
+TEST_START = TEST_END - datetime.timedelta(days=7)
 
 
 @pytest.fixture(scope="module")
@@ -179,7 +180,7 @@ def test_trade_history_sync_resume(session, tmp_path):
             session,
             VAULT_ADDRESS,
             start_time=TEST_START,
-            end_time=datetime.datetime(2025, 12, 10),
+            end_time=TEST_START + datetime.timedelta(days=3),
         )
         db.save()
 
