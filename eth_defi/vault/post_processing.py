@@ -15,9 +15,8 @@ from pathlib import Path
 from eth_defi.grvt.constants import GRVT_CHAIN_ID, GRVT_DAILY_METRICS_DATABASE
 from eth_defi.grvt.daily_metrics import GRVTDailyMetricsDatabase
 from eth_defi.grvt.vault_data_export import merge_into_uncleaned_parquet as grvt_merge_parquet
-from eth_defi.hyperliquid.constants import HYPERCORE_CHAIN_ID, HYPERLIQUID_DAILY_METRICS_DATABASE
-from eth_defi.hyperliquid.daily_metrics import HyperliquidDailyMetricsDatabase
-from eth_defi.hyperliquid.vault_data_export import merge_into_uncleaned_parquet as hyperliquid_merge_parquet
+from eth_defi.hyperliquid.constants import HYPERCORE_CHAIN_ID
+from eth_defi.hyperliquid.vault_data_export import open_and_merge_hypercore_prices
 from eth_defi.lighter.constants import LIGHTER_CHAIN_ID, LIGHTER_DAILY_METRICS_DATABASE
 from eth_defi.lighter.daily_metrics import LighterDailyMetricsDatabase
 from eth_defi.lighter.vault_data_export import merge_into_uncleaned_parquet as lighter_merge_parquet
@@ -33,6 +32,7 @@ def merge_native_protocols(
     merge_lighter: bool = False,
     uncleaned_parquet_path: Path | None = None,
     hyperliquid_db_path: Path | None = None,
+    hyperliquid_hf_db_path: Path | None = None,
     grvt_db_path: Path | None = None,
     lighter_db_path: Path | None = None,
 ) -> dict[str, bool]:
@@ -41,11 +41,16 @@ def merge_native_protocols(
     Must run before cleaning so that native protocol data goes through
     the same cleaning pipeline as EVM vaults.
 
+    For Hypercore, both the daily and HF DuckDB databases are always
+    merged together so that switching between modes never loses
+    historical data.
+
     :param merge_hypercore: Merge Hyperliquid native (Hypercore) vault data
     :param merge_grvt: Merge GRVT native vault data
     :param merge_lighter: Merge Lighter native pool data
     :param uncleaned_parquet_path: Override for the uncleaned parquet path
-    :param hyperliquid_db_path: Override for the Hyperliquid DuckDB path
+    :param hyperliquid_db_path: Override for the daily Hyperliquid DuckDB path
+    :param hyperliquid_hf_db_path: Override for the HF Hyperliquid DuckDB path
     :param grvt_db_path: Override for the GRVT DuckDB path
     :param lighter_db_path: Override for the Lighter DuckDB path
     :return: Dictionary mapping step name to success boolean
@@ -56,14 +61,13 @@ def merge_native_protocols(
     if merge_hypercore:
         try:
             logger.info("Merging Hypercore prices into uncleaned parquet")
-            hl_db_path = hyperliquid_db_path or HYPERLIQUID_DAILY_METRICS_DATABASE
-            db = HyperliquidDailyMetricsDatabase(hl_db_path)
-            try:
-                combined_df = hyperliquid_merge_parquet(db, parquet_path)
-                hl_rows = len(combined_df[combined_df["chain"] == HYPERCORE_CHAIN_ID]) if len(combined_df) > 0 else 0
-                logger.info("Hypercore price merge: %d Hyperliquid price entries in uncleaned parquet", hl_rows)
-            finally:
-                db.close()
+            combined_df = open_and_merge_hypercore_prices(
+                parquet_path,
+                daily_db_path=hyperliquid_db_path,
+                hf_db_path=hyperliquid_hf_db_path,
+            )
+            hl_rows = len(combined_df[combined_df["chain"] == HYPERCORE_CHAIN_ID]) if len(combined_df) > 0 else 0
+            logger.info("Hypercore price merge: %d Hyperliquid price entries in uncleaned parquet", hl_rows)
             steps["hypercore-price-merge"] = True
         except Exception:
             logger.exception("Hypercore price merge failed")
@@ -199,6 +203,7 @@ def run_post_processing(
     skip_data: bool = False,
     uncleaned_parquet_path: Path | None = None,
     hyperliquid_db_path: Path | None = None,
+    hyperliquid_hf_db_path: Path | None = None,
     grvt_db_path: Path | None = None,
     lighter_db_path: Path | None = None,
     vault_db_path: Path | None = None,
@@ -221,7 +226,8 @@ def run_post_processing(
     :param skip_metadata: Skip protocol/stablecoin metadata export to R2
     :param skip_data: Skip data file (parquet, pickle) export to R2
     :param uncleaned_parquet_path: Override for the uncleaned parquet path
-    :param hyperliquid_db_path: Override for the Hyperliquid DuckDB path
+    :param hyperliquid_db_path: Override for the daily Hyperliquid DuckDB path
+    :param hyperliquid_hf_db_path: Override for the HF Hyperliquid DuckDB path
     :param grvt_db_path: Override for the GRVT DuckDB path
     :param lighter_db_path: Override for the Lighter DuckDB path
     :param vault_db_path: Override for the vault database pickle path
@@ -237,6 +243,7 @@ def run_post_processing(
         merge_lighter=scan_lighter,
         uncleaned_parquet_path=uncleaned_parquet_path,
         hyperliquid_db_path=hyperliquid_db_path,
+        hyperliquid_hf_db_path=hyperliquid_hf_db_path,
         grvt_db_path=grvt_db_path,
         lighter_db_path=lighter_db_path,
     )

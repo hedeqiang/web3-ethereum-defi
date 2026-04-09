@@ -220,12 +220,7 @@ def fetch_vault_deposits(
 
         logger.debug("Fetching ledger updates: startTime=%s, endTime=%s", start_ms, current_end_ms)
 
-        response = session.post(
-            f"{session.api_url}/info",
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=timeout,
-        )
+        response = session.post_info(payload, timeout=timeout)
         response.raise_for_status()
         raw_updates = response.json()
 

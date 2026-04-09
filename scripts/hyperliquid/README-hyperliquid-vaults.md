@@ -73,7 +73,13 @@ in the Hyperliquid docs.
 
 ### DuckDB schema
 
-See `constants.py` for storage.
+Both the daily and HF database classes inherit from
+`HyperliquidMetricsDatabaseBase` in `vault_metrics_db.py`, which manages the
+shared `vault_metadata` table and common lifecycle methods (tombstoning,
+disappeared vault tracking, TVL bulk updates).  Each subclass adds its own
+price table.
+
+See `constants.py` for storage paths.
 
 ```
 vault_metadata                        vault_daily_prices
@@ -281,6 +287,68 @@ FULL_SCAN_WEEKDAY=3 LOG_LEVEL=info \
 |----------|---------|-------------|
 | `FULL_SCAN` | *(unset)* | Set to `1` to force a full scan |
 | `FULL_SCAN_WEEKDAY` | `6` (Sunday) | Day of the week to auto-trigger full scan |
+
+## High-frequency pipeline
+
+An alternative pipeline collects vault data at sub-daily intervals (default 4h,
+configurable down to 1h) using Webshare rotating proxies for parallel throughput.
+
+### Architecture
+
+- **Shared base class**: `HyperliquidMetricsDatabaseBase` in `vault_metrics_db.py`
+  provides the `vault_metadata` table and common methods (lifecycle, queries,
+  persistence). Both daily and HF database classes inherit from it.
+- **Separate DuckDB**: `hyperliquid-vaults-hf.duckdb` with `vault_high_freq_prices`
+  table keyed by `(vault_address, TIMESTAMP)` instead of `(vault_address, DATE)`
+- **Raw timestamps**: API timestamps are stored as-is (no flooring or
+  normalisation). The downstream `forward_fill_vault()` resamples to 1h when needed.
+- **Combined merge**: `merge_hypercore_prices_to_parquet()` reads both daily and
+  HF databases together, deduplicates, and writes to parquet — switching modes
+  never loses historical data
+- **Shared export helper**: `_prepare_hypercore_export()` handles forward-filling,
+  deposit status, and DataFrame construction for both daily and HF exports
+- **Proxy-aware parallelism**: pre-created session pool with per-worker rate
+  limiting via `session.clone_for_worker()`
+
+See `README-hyperliquid-vaults-high-frequency.md` for the full architecture.
+
+### Usage
+
+```shell
+# Single run with defaults (4h interval, no proxies)
+poetry run python scripts/hyperliquid/high-freq-vault-metrics.py
+
+# With proxies and 1h interval
+WEBSHARE_API_KEY=$WEBSHARE_API_KEY SCAN_INTERVAL=1h \
+  poetry run python scripts/hyperliquid/high-freq-vault-metrics.py
+
+# Loop mode (repeats every scan interval)
+WEBSHARE_API_KEY=$WEBSHARE_API_KEY LOOP=1 \
+  poetry run python scripts/hyperliquid/high-freq-vault-metrics.py
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DB_PATH` | `~/.tradingstrategy/vaults/hyperliquid-vaults-hf.duckdb` | HF DuckDB path |
+| `SCAN_INTERVAL` | `4h` | Scan interval (e.g. `1h`, `4h`, `6h`) |
+| `LOOP` | *(unset)* | Set to `1` for loop mode |
+| `WEBSHARE_API_KEY` | *(unset)* | Enables Webshare proxy rotation |
+| `REQUESTS_PER_SECOND` | `1.0` | Per-IP rate limit |
+| `MIN_TVL` | `5000` | Minimum TVL in USD |
+| `MAX_VAULTS` | `20000` | Maximum vaults to process |
+| `MAX_WORKERS` | `16` | Parallel workers |
+
+### Integration with scan-all-chains
+
+Set `HYPERCORE_MODE=high_freq` to use the HF pipeline instead of the daily
+pipeline when running `scan-vaults-all-chains.py`:
+
+```shell
+SCAN_HYPERCORE=true HYPERCORE_MODE=high_freq SCAN_CYCLES="Hypercore=4h" \
+  poetry run python scripts/erc-4626/scan-vaults-all-chains.py
+```
 
 ## Healing share price data
 

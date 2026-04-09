@@ -35,8 +35,9 @@ from eth_typing import HexAddress
 
 from eth_defi.compat import native_datetime_utc_now
 from eth_defi.erc_4626.core import ERC4262VaultDetection, ERC4626Feature
-from eth_defi.hyperliquid.constants import HYPERCORE_CHAIN_ID, HYPERLIQUID_PROTOCOL_VAULT_LOCKUP, HYPERLIQUID_USER_VAULT_LOCKUP, HYPERLIQUID_VAULT_FEE_MODE, HYPERLIQUID_VAULT_PERFORMANCE_FEE
+from eth_defi.hyperliquid.constants import HYPERCORE_CHAIN_ID, HYPERLIQUID_DAILY_METRICS_DATABASE, HYPERLIQUID_HIGH_FREQ_METRICS_DATABASE, HYPERLIQUID_PROTOCOL_VAULT_LOCKUP, HYPERLIQUID_USER_VAULT_LOCKUP, HYPERLIQUID_VAULT_FEE_MODE, HYPERLIQUID_VAULT_PERFORMANCE_FEE
 from eth_defi.hyperliquid.daily_metrics import HyperliquidDailyMetricsDatabase
+from eth_defi.hyperliquid.high_freq_metrics import HyperliquidHighFreqMetricsDatabase
 from eth_defi.vault.base import VaultHistoricalRead, VaultSpec
 from eth_defi.vault.fee import FeeData
 from eth_defi.vault.flag import VaultFlag
@@ -261,6 +262,86 @@ def _compute_deposit_closed_reason_column(prices_df: pd.DataFrame) -> pd.Series:
     return pd.Series(reasons, index=prices_df.index)
 
 
+def _prepare_hypercore_export(
+    prices_df: pd.DataFrame,
+    timestamp_values,
+    flow_col_map: dict[str, str],
+    sort_columns: list[str],
+) -> pd.DataFrame:
+    """Shared helper for building Hypercore export DataFrames.
+
+    Handles forward-filling state columns, computing deposit status,
+    and constructing the EVM-compatible output schema.
+
+    :param prices_df:
+        Raw price data from DuckDB (daily or HF).
+    :param timestamp_values:
+        Array of timestamp values for the output ``timestamp`` column.
+    :param flow_col_map:
+        Mapping from output column name to source column name in
+        ``prices_df`` (e.g. ``{"daily_deposit_count": "daily_deposit_count"}``
+        for daily, ``{"daily_deposit_count": "deposit_count"}`` for HF).
+    :param sort_columns:
+        Columns to sort by before forward-filling (e.g.
+        ``["vault_address", "date"]`` or ``["vault_address", "timestamp"]``).
+    :return:
+        DataFrame matching the uncleaned Parquet schema.
+    """
+    # Forward-fill sparse state columns within each vault
+    state_cols = ["is_closed", "allow_deposits", "leader_fraction"]
+    existing_state_cols = [c for c in state_cols if c in prices_df.columns]
+    if existing_state_cols:
+        prices_df = prices_df.sort_values(sort_columns)
+        prices_df[existing_state_cols] = prices_df.groupby("vault_address")[existing_state_cols].ffill()
+
+    # Compute deposit_closed_reason per row from forward-filled state.
+    deposit_reasons = _compute_deposit_closed_reason_column(prices_df)
+
+    # Derive deposits_open string for backwards compatibility with ERC-4626 column.
+    has_state = prices_df["is_closed"].notna() if "is_closed" in prices_df.columns else pd.Series(False, index=prices_df.index)
+    deposits_open = pd.Series([None] * len(prices_df), index=prices_df.index, dtype=object)
+    deposits_open[has_state & deposit_reasons.isna()] = "true"
+    deposits_open[has_state & deposit_reasons.notna()] = "false"
+
+    chain_id = HYPERCORE_CHAIN_ID
+
+    def _col(name: str, default=np.nan):
+        return prices_df[name].values if name in prices_df.columns else default
+
+    result = pd.DataFrame(
+        {
+            "chain": chain_id,
+            "address": prices_df["vault_address"].values,
+            "block_number": 0,
+            "timestamp": timestamp_values,
+            "share_price": prices_df["share_price"].values,
+            "total_assets": prices_df["tvl"].values,
+            "account_pnl": _col("cumulative_pnl"),
+            "follower_count": _col("follower_count"),
+            "cumulative_volume": _col("cumulative_volume"),
+            "total_supply": 0.0,
+            "performance_fee": 0.0,
+            "management_fee": 0.0,
+            "errors": "",
+            "deposits_open": deposits_open.values,
+            "deposit_closed_reason": deposit_reasons.values,
+            "leader_fraction": _col("leader_fraction"),
+            "leader_commission": _col("leader_commission"),
+            "daily_deposit_count": _col(flow_col_map.get("daily_deposit_count", "daily_deposit_count")),
+            "daily_withdrawal_count": _col(flow_col_map.get("daily_withdrawal_count", "daily_withdrawal_count")),
+            "daily_deposit_usd": _col(flow_col_map.get("daily_deposit_usd", "daily_deposit_usd")),
+            "daily_withdrawal_usd": _col(flow_col_map.get("daily_withdrawal_usd", "daily_withdrawal_usd")),
+            "epoch_reset": _col("epoch_reset", default=False),
+            "written_at": _col("written_at", default=pd.NaT),
+        },
+    )
+
+    result["chain"] = result["chain"].astype("int32")
+    result["block_number"] = result["block_number"].astype("int64")
+
+    return result
+
+
 def build_raw_prices_dataframe(db: HyperliquidDailyMetricsDatabase) -> pd.DataFrame:
     """Build a raw prices DataFrame from the Hyperliquid DuckDB.
 
@@ -290,68 +371,15 @@ def build_raw_prices_dataframe(db: HyperliquidDailyMetricsDatabase) -> pd.DataFr
         DataFrame with columns matching the uncleaned Parquet schema.
     """
     prices_df = db.get_all_daily_prices()
-
     if prices_df.empty:
         return pd.DataFrame()
 
-    # Forward-fill sparse state columns within each vault so that the
-    # latest known is_closed / allow_deposits / leader_fraction propagates
-    # to subsequent rows.  Early rows before first observation stay NaN.
-    state_cols = ["is_closed", "allow_deposits", "leader_fraction"]
-    existing_state_cols = [c for c in state_cols if c in prices_df.columns]
-    if existing_state_cols:
-        prices_df = prices_df.sort_values(["vault_address", "date"])
-        prices_df[existing_state_cols] = prices_df.groupby("vault_address")[existing_state_cols].ffill()
-
-    # Compute deposit_closed_reason per row from forward-filled state.
-    deposit_reasons = _compute_deposit_closed_reason_column(prices_df)
-
-    # Derive deposits_open string for backwards compatibility with ERC-4626 column.
-    has_state = prices_df["is_closed"].notna() if "is_closed" in prices_df.columns else pd.Series(False, index=prices_df.index)
-    deposits_open = pd.Series([None] * len(prices_df), index=prices_df.index, dtype=object)
-    deposits_open[has_state & deposit_reasons.isna()] = "true"
-    deposits_open[has_state & deposit_reasons.notna()] = "false"
-
-    chain_id = HYPERCORE_CHAIN_ID
-
-    # Use .values to strip the DuckDB RangeIndex — otherwise pandas
-    # tries to align it with the new index and fills everything with NaN.
-    #
-    # leader_fraction values are 0-1 matching the Percent type alias
-    # (e.g. 0.05 = 5%).
-    result = pd.DataFrame(
-        {
-            "chain": chain_id,
-            "address": prices_df["vault_address"].values,
-            "block_number": 0,
-            "timestamp": pd.to_datetime(prices_df["date"]).values,
-            "share_price": prices_df["share_price"].values,
-            "total_assets": prices_df["tvl"].values,
-            "account_pnl": prices_df["cumulative_pnl"].values if "cumulative_pnl" in prices_df.columns else np.nan,
-            "follower_count": prices_df["follower_count"].values if "follower_count" in prices_df.columns else np.nan,
-            "cumulative_volume": prices_df["cumulative_volume"].values if "cumulative_volume" in prices_df.columns else np.nan,
-            "total_supply": 0.0,
-            "performance_fee": 0.0,
-            "management_fee": 0.0,
-            "errors": "",
-            "deposits_open": deposits_open.values,
-            "deposit_closed_reason": deposit_reasons.values,
-            "leader_fraction": prices_df["leader_fraction"].values if "leader_fraction" in prices_df.columns else np.nan,
-            "leader_commission": prices_df["leader_commission"].values if "leader_commission" in prices_df.columns else np.nan,
-            "daily_deposit_count": prices_df["daily_deposit_count"].values if "daily_deposit_count" in prices_df.columns else np.nan,
-            "daily_withdrawal_count": prices_df["daily_withdrawal_count"].values if "daily_withdrawal_count" in prices_df.columns else np.nan,
-            "daily_deposit_usd": prices_df["daily_deposit_usd"].values if "daily_deposit_usd" in prices_df.columns else np.nan,
-            "daily_withdrawal_usd": prices_df["daily_withdrawal_usd"].values if "daily_withdrawal_usd" in prices_df.columns else np.nan,
-            "epoch_reset": prices_df["epoch_reset"].values if "epoch_reset" in prices_df.columns else False,
-            "written_at": prices_df["written_at"].values if "written_at" in prices_df.columns else pd.NaT,
-        },
+    return _prepare_hypercore_export(
+        prices_df,
+        timestamp_values=pd.to_datetime(prices_df["date"]).values,
+        flow_col_map={},  # Daily columns already named daily_*
+        sort_columns=["vault_address", "date"],
     )
-
-    # Ensure correct dtypes
-    result["chain"] = result["chain"].astype("int32")
-    result["block_number"] = result["block_number"].astype("int64")
-
-    return result
 
 
 def merge_into_vault_database(
@@ -481,3 +509,179 @@ def merge_into_uncleaned_parquet(
     )
 
     return combined
+
+
+# ──────────────────────────────────────────────
+# High-frequency export functions
+# ──────────────────────────────────────────────
+
+
+def build_raw_prices_dataframe_hf(db: HyperliquidHighFreqMetricsDatabase) -> pd.DataFrame:
+    """Build a raw prices DataFrame from the HF DuckDB.
+
+    Exports raw API timestamps without resampling.  The downstream
+    cleaning pipeline computes ``returns_1h`` via ``pct_change()`` on
+    consecutive rows — this already works for irregular timestamps
+    (the daily pipeline has always produced ~24h returns labelled
+    ``returns_1h`` for Hypercore).  The downstream
+    ``forward_fill_vault()`` resamples to 1h when needed.
+
+    :param db:
+        The HF metrics database.
+    :return:
+        DataFrame matching the uncleaned Parquet schema with raw
+        timestamps.
+    """
+    prices_df = db.get_all_high_freq_prices()
+    if prices_df.empty:
+        return pd.DataFrame()
+
+    # Map HF column names (deposit_count etc.) back to daily_* names
+    # for downstream compatibility.
+    return _prepare_hypercore_export(
+        prices_df,
+        timestamp_values=prices_df["timestamp"].values,
+        flow_col_map={
+            "daily_deposit_count": "deposit_count",
+            "daily_withdrawal_count": "withdrawal_count",
+            "daily_deposit_usd": "deposit_usd",
+            "daily_withdrawal_usd": "withdrawal_usd",
+        },
+        sort_columns=["vault_address", "timestamp"],
+    )
+
+
+def merge_hypercore_prices_to_parquet(
+    parquet_path: Path,
+    daily_db: HyperliquidDailyMetricsDatabase | None = None,
+    hf_db: HyperliquidHighFreqMetricsDatabase | None = None,
+) -> pd.DataFrame:
+    """Merge Hypercore price data from one or both DuckDB databases into the Parquet.
+
+    Reads data from whichever databases are provided, combines them
+    (deduplicating on ``(address, timestamp)``), removes old chain-9999
+    rows from the Parquet, and writes the combined result.
+
+    This is safe for mode switches: if only the HF database is provided
+    but the daily database also exists, pass both to preserve all
+    historical data.  When both databases contain a row for the same
+    vault at the same timestamp, the HF row wins (more recent data).
+
+    Daily rows have midnight timestamps (from ``pd.to_datetime(date)``),
+    HF rows have raw API timestamps — they rarely collide.
+
+    :param parquet_path:
+        Path to the uncleaned Parquet file.
+    :param daily_db:
+        Daily metrics database (optional).
+    :param hf_db:
+        High-frequency metrics database (optional).
+    :return:
+        The combined DataFrame (EVM + Hypercore rows).
+    """
+    parts: list[pd.DataFrame] = []
+
+    if daily_db is not None:
+        daily_df = build_raw_prices_dataframe(daily_db)
+        if not daily_df.empty:
+            daily_df["_source"] = "daily"
+            parts.append(daily_df)
+            logger.info("Daily DB contributed %d Hypercore rows", len(daily_df))
+
+    if hf_db is not None:
+        hf_df = build_raw_prices_dataframe_hf(hf_db)
+        if not hf_df.empty:
+            hf_df["_source"] = "hf"
+            parts.append(hf_df)
+            logger.info("HF DB contributed %d Hypercore rows", len(hf_df))
+
+    if not parts:
+        logger.warning("No Hyperliquid data to merge from either database")
+        if parquet_path.exists():
+            return pd.read_parquet(parquet_path)
+        return pd.DataFrame()
+
+    hl_df = pd.concat(parts, ignore_index=True)
+
+    # Deduplicate: when both databases have a row for the same
+    # (address, timestamp), keep the HF row (more granular/recent).
+    # Sort so "hf" comes after "daily", then drop_duplicates keeps last.
+    hl_df = hl_df.sort_values(["address", "timestamp", "_source"])
+    hl_df = hl_df.drop_duplicates(subset=["address", "timestamp"], keep="last")
+    hl_df = hl_df.drop(columns=["_source"])
+
+    if parquet_path.exists():
+        existing_df = pd.read_parquet(parquet_path)
+        # Remove any existing Hypercore rows — we replace them all
+        existing_df = existing_df[existing_df["chain"] != HYPERCORE_CHAIN_ID]
+        combined = pd.concat([existing_df, hl_df], ignore_index=True)
+    else:
+        parquet_path.parent.mkdir(parents=True, exist_ok=True)
+        combined = hl_df
+
+    combined = combined.sort_values(["chain", "address", "timestamp"])
+
+    VaultHistoricalRead.write_uncleaned_parquet(combined, parquet_path)
+
+    hl_vault_count = hl_df["address"].nunique()
+    logger.info(
+        "Merged %d Hyperliquid vaults (%d rows) into uncleaned %s",
+        hl_vault_count,
+        len(hl_df),
+        parquet_path,
+    )
+
+    return combined
+
+
+def open_and_merge_hypercore_prices(
+    parquet_path: Path,
+    daily_db_path: Path | None = None,
+    hf_db_path: Path | None = None,
+) -> pd.DataFrame:
+    """Open whichever Hyperliquid databases exist and merge into the parquet.
+
+    Convenience wrapper around :py:func:`merge_hypercore_prices_to_parquet`
+    that handles opening and closing both databases.  Used by standalone
+    scripts and post-processing to avoid duplicating the open/close pattern.
+
+    :param parquet_path:
+        Path to the uncleaned Parquet file.
+    :param daily_db_path:
+        Path to the daily DuckDB (``None`` uses default, skipped if not on disc).
+    :param hf_db_path:
+        Path to the HF DuckDB (``None`` uses default, skipped if not on disc).
+    :return:
+        The combined DataFrame (EVM + Hypercore rows).
+    """
+    daily_path = daily_db_path or HYPERLIQUID_DAILY_METRICS_DATABASE
+    hf_path = hf_db_path or HYPERLIQUID_HIGH_FREQ_METRICS_DATABASE
+
+    daily_db = None
+    hf_db = None
+
+    if daily_path.exists():
+        daily_db = HyperliquidDailyMetricsDatabase(daily_path)
+        logger.info("Opened daily Hyperliquid DB: %s", daily_path)
+
+    if hf_path.exists():
+        hf_db = HyperliquidHighFreqMetricsDatabase(hf_path)
+        logger.info("Opened HF Hyperliquid DB: %s", hf_path)
+
+    if daily_db is None and hf_db is None:
+        logger.warning("No Hyperliquid DuckDB databases found")
+        if parquet_path.exists():
+            return pd.read_parquet(parquet_path)
+        return pd.DataFrame()
+
+    try:
+        return merge_hypercore_prices_to_parquet(
+            parquet_path,
+            daily_db=daily_db,
+            hf_db=hf_db,
+        )
+    finally:
+        if daily_db is not None:
+            daily_db.close()
+        if hf_db is not None:
+            hf_db.close()

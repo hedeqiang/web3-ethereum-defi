@@ -55,8 +55,8 @@ from eth_defi.hyperliquid.constants import HYPERCORE_CHAIN_ID, HYPERLIQUID_DAILY
 from eth_defi.hyperliquid.daily_metrics import run_daily_scan
 from eth_defi.hyperliquid.session import create_hyperliquid_session
 from eth_defi.hyperliquid.vault_data_export import (
-    merge_into_uncleaned_parquet,
     merge_into_vault_database,
+    open_and_merge_hypercore_prices,
 )
 from eth_defi.research.wrangle_vault_prices import generate_cleaned_vault_datasets
 from eth_defi.utils import setup_console_logging
@@ -139,9 +139,11 @@ def main():
         vault_db = merge_into_vault_database(db, vault_db_path)
         print(f"VaultDatabase now has {len(vault_db)} total vaults")
 
-        # Step 3: Merge into uncleaned Parquet (raw format for the cleaning pipeline)
+        # Step 3: Merge into uncleaned Parquet.
+        # Uses the combined merge that reads both daily and HF databases
+        # to avoid losing data when switching between modes.
         print(f"\nStep 3: Merging into uncleaned Parquet at {uncleaned_path}...")
-        combined_df = merge_into_uncleaned_parquet(db, uncleaned_path)
+        combined_df = open_and_merge_hypercore_prices(uncleaned_path, daily_db_path=db_path)
         hl_rows = combined_df[combined_df["chain"] == HYPERCORE_CHAIN_ID] if len(combined_df) > 0 else combined_df
         print(f"Uncleaned parquet now has {len(combined_df):,} total rows ({len(hl_rows):,} Hyperliquid)")
 
