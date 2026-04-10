@@ -1425,23 +1425,23 @@ def main():
             with wait_other_writers(pipeline_lock_path, timeout=60):
                 if looped_mode:
                     state = load_cycle_state(cycle_state_path)
-                    if cycle == 1:
-                        # On the first tick after startup always scan everything,
-                        # regardless of cycle state. Without this the container
-                        # would sleep a full LOOP_INTERVAL_SECONDS before doing any
-                        # work whenever the on-disc cycle state has fresh timestamps
-                        # (e.g. from a prior run or the single-run vault-scanner).
-                        logger.info("Cycle %d: first tick after startup, scanning all items", cycle)
-                        due_chains = list(chains)
-                        due_protocols = list(all_protocols)
-                    else:
-                        due_chains, due_protocols = get_due_items(
-                            chains,
-                            all_protocols,
-                            cycle_overrides,
-                            default_cycle,
-                            state,
-                        )
+                    # Always resume from persisted cycle state, including cycle 1.
+                    # Cycle state is written incrementally after every successful
+                    # item (see ``_save_item`` below), so items completed before a
+                    # crash keep their fresh timestamps and are skipped, while
+                    # items that had not been scanned yet are missing from state
+                    # and become due. This gives automatic crash recovery without
+                    # re-scanning everything. If everything in state is fresh
+                    # (e.g. the container restarted shortly after completing a
+                    # full cycle) the loop will correctly sleep until the next
+                    # item is due.
+                    due_chains, due_protocols = get_due_items(
+                        chains,
+                        all_protocols,
+                        cycle_overrides,
+                        default_cycle,
+                        state,
+                    )
 
                     if due_chains or due_protocols:
                         # Compute items not due in this cycle with hours remaining
