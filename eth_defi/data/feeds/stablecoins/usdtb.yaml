@@ -7,3 +7,6 @@ website: https://usdtb.money/
 twitter: ethena
 linkedin: ethena-labs
 rss: https://mirror.xyz/0xF99d0E4E3435cc9C9868D1C6274DfaB3e2721341/feed/atom
+rss-failure-at: 2026-04-10
+rss-failure-status-code: 429
+rss-failure-exception-message: "429 Client Error: Too Many Requests for url: https://mirror.xyz/0xF99d0E4E3435cc9C9868D1C6274DfaB3e2721341/feed/atom"

@@ -5,5 +5,5 @@ website: https://www.euler.finance/
 twitter: eulerfinance
 linkedin: euler-xyz
 rss: https://newsletter.euler.finance/feed
-rss-failure-at: 2026-04-06
+rss-failure-at: 2026-04-10
 rss-failure-exception-message: "Feed parse failed for https://newsletter.euler.finance/feed: <unknown>:2:2258: not well-formed (invalid token)"
