@@ -58,6 +58,10 @@ _call_missing_exceptions = (TransactionFailed, BadFunctionCallOutput, ValueError
 
 #: By default we cache 1024 token details using LRU in the process memory.
 #:
+#: For long-running batch jobs you probably want a persistent on-disk cache instead —
+#: see :py:class:`TokenDiskCache`, which survives across process restarts and can be
+#: warmed up with multicall.
+#:
 DEFAULT_TOKEN_CACHE = cachetools.LRUCache(1024)
 
 #: ERC-20 address, 0x prefixed string

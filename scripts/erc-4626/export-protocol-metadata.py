@@ -72,7 +72,7 @@ def main():
 
     for current_bucket in bucket_names:
         if len(bucket_names) > 1:
-            logger.info("Uploading to bucket: %s", current_bucket)
+            logger.info("Processing metadata export for bucket: %s", current_bucket)
 
         # Upload protocol metadata
         def _process_slug(slug: str, _bucket: str = current_bucket):
@@ -86,7 +86,7 @@ def main():
             )
 
         tasks = (delayed(_process_slug)(slug) for slug in slugs)
-        Parallel(n_jobs=max_workers, prefer="threads")(tqdm(tasks, total=len(slugs), desc="Uploading protocol metadata"))
+        Parallel(n_jobs=max_workers, prefer="threads")(tqdm(tasks, total=len(slugs), desc="Checking protocol metadata"))
 
         # Upload stablecoin metadata
         def _process_stablecoin(yaml_path: Path, _bucket: str = current_bucket):
@@ -100,7 +100,7 @@ def main():
             )
 
         stablecoin_tasks = (delayed(_process_stablecoin)(f) for f in stablecoin_files)
-        Parallel(n_jobs=max_workers, prefer="threads")(tqdm(stablecoin_tasks, total=len(stablecoin_files), desc="Uploading stablecoin metadata"))
+        Parallel(n_jobs=max_workers, prefer="threads")(tqdm(stablecoin_tasks, total=len(stablecoin_files), desc="Checking stablecoin metadata"))
 
         # Upload aggregate stablecoin index
         index = upload_stablecoin_index(
@@ -148,7 +148,7 @@ def main():
         )
 
     curator_tasks = (delayed(_process_curator)(f) for f in curator_files)
-    Parallel(n_jobs=max_workers, prefer="threads")(tqdm(curator_tasks, total=len(curator_files), desc="Uploading curator metadata"))
+    Parallel(n_jobs=max_workers, prefer="threads")(tqdm(curator_tasks, total=len(curator_files), desc="Checking curator metadata"))
 
     # Upload protocol-curator entries (Ostium, gTrade, Hyperliquid, Lighter)
     upload_protocol_curator_metadata(
