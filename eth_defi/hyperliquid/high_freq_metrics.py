@@ -366,7 +366,7 @@ def fetch_and_store_vault_high_freq(
             vault_address=vault_address,
             timeout=timeout,
         )
-        info: VaultInfo = vault.fetch_info()
+        info: VaultInfo = vault.fetch_metadata()
     except Exception as e:
         logger.warning(
             "Failed to fetch vault details for %s (%s): %s",

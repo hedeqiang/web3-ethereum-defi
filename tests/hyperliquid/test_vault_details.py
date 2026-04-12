@@ -26,7 +26,7 @@ def vault(session, hyperliquid_sample_vault) -> HyperliquidVault:
 @pytest.fixture(scope="module")
 def vault_info(vault) -> VaultInfo:
     """Fetch vault info once for all tests."""
-    return vault.fetch_info()
+    return vault.fetch_metadata()
 
 
 def test_vault_info_basic_properties(vault_info: VaultInfo, hyperliquid_sample_vault):

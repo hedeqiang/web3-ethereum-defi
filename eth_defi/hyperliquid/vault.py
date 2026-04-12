@@ -277,37 +277,8 @@ class HyperliquidVault:
         response.raise_for_status()
         return response.json()
 
-    def fetch_info(self) -> VaultInfo:
-        """Fetch detailed vault information from the Hyperliquid API.
-
-        Makes a request to the ``vaultDetails`` endpoint and returns
-        a typed :py:class:`VaultInfo` dataclass with all vault metadata.
-
-        Use :py:attr:`info` property for cached access.
-
-        Example::
-
-            from eth_defi.hyperliquid.session import create_hyperliquid_session
-            from eth_defi.hyperliquid.vault import HyperliquidVault
-
-            session = create_hyperliquid_session()
-            vault = HyperliquidVault(
-                session=session,
-                vault_address="0x3df9769bbbb335340872f01d8157c779d73c6ed0",
-            )
-
-            info = vault.fetch_info()
-            print(f"Vault: {info.name}")
-            print(f"Leader: {info.leader}")
-            print(f"Followers: {len(info.followers)}")
-
-        :return:
-            VaultInfo dataclass with vault details
-        :raises requests.HTTPError:
-            If the HTTP request fails
-        """
-        data = self._make_request("vaultDetails", {"vaultAddress": self.vault_address})
-
+    def _parse_vault_details(self, data: dict) -> VaultInfo:
+        """Parse a raw ``vaultDetails`` JSON response into a :class:`VaultInfo`."""
         # Parse followers
         followers = []
         for f in data.get("followers", []):
@@ -360,17 +331,83 @@ class HyperliquidVault:
             parent=parent,
         )
 
+    def fetch_info(self, user: HexAddress | None = None) -> VaultInfo:
+        """Fetch detailed vault information from the Hyperliquid API.
+
+        Makes a request to the ``vaultDetails`` endpoint and returns
+        a typed :py:class:`VaultInfo` dataclass with all vault metadata.
+
+        .. note::
+
+            The ``maxWithdrawable`` field in the API response is
+            **per-user**.  You must pass the depositor ``user``
+            address to obtain the real withdrawable amount;
+            without it the API always returns ``0``.
+
+        Example::
+
+            from eth_defi.hyperliquid.session import create_hyperliquid_session
+            from eth_defi.hyperliquid.vault import HyperliquidVault
+
+            session = create_hyperliquid_session()
+            vault = HyperliquidVault(
+                session=session,
+                vault_address="0x3df9769bbbb335340872f01d8157c779d73c6ed0",
+            )
+
+            info = vault.fetch_info(user="0xYourAddress")
+            print(f"Vault: {info.name}")
+            print(f"Leader: {info.leader}")
+            print(f"Max withdrawable: {info.max_withdrawable}")
+
+        :param user:
+            Depositor address.  The ``maxWithdrawable`` field in
+            the Hyperliquid ``vaultDetails`` response is per-user;
+            without this parameter the API always returns ``0``.
+        :return:
+            VaultInfo dataclass with vault details
+        :raises requests.HTTPError:
+            If the HTTP request fails
+        """
+        assert user is not None, (
+            "user address is required for fetch_info() — "
+            "Hyperliquid vaultDetails returns maxWithdrawable=0 without it. "
+            "Use fetch_metadata() if you only need vault metadata without user-specific data."
+        )
+        params: dict[str, Any] = {"vaultAddress": self.vault_address, "user": user}
+        data = self._make_request("vaultDetails", params)
+        return self._parse_vault_details(data)
+
+    def fetch_metadata(self) -> VaultInfo:
+        """Fetch vault metadata without user-specific data.
+
+        Like :meth:`fetch_info` but does not require a user address.
+        The returned :attr:`VaultInfo.max_withdrawable` will always
+        be ``0`` because the Hyperliquid API only returns a meaningful
+        value when a depositor address is provided.
+
+        Use this for scanning, metrics collection, and other contexts
+        where user-specific withdrawal limits are not needed.
+
+        :return:
+            VaultInfo dataclass (``max_withdrawable`` is always ``0``)
+        """
+        data = self._make_request("vaultDetails", {"vaultAddress": self.vault_address})
+        return self._parse_vault_details(data)
+
     @cached_property
     def info(self) -> VaultInfo:
-        """Cached vault information.
+        """Cached vault metadata.
 
         Fetches vault details on first access and caches the result.
-        Use :py:meth:`fetch_info` to force a fresh fetch.
+        Uses :meth:`fetch_metadata` (no user context), so
+        ``max_withdrawable`` is ``0``.  Call :meth:`fetch_info`
+        with a user address when you need withdrawal limits.
 
         :return:
             VaultInfo dataclass with vault details
         """
-        return self.fetch_info()
+        return self.fetch_metadata()
 
 
 class VaultSortKey(Enum):

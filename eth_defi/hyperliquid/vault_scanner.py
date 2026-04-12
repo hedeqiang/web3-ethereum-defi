@@ -548,7 +548,7 @@ def scan_vaults(
                 vault_address=summary.vault_address,
                 timeout=timeout,
             )
-            info = vault.fetch_info()
+            info = vault.fetch_metadata()
             follower_count = len(info.followers)
             allow_deposits = info.allow_deposits
 
