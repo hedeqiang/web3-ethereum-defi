@@ -1,5 +1,17 @@
 # Instructions to work with the code base
 
+## Reference docs for Claude
+
+Repo-local reference docs that Claude should consult when the task
+touches the relevant area:
+
+- `.claude/docs/gspread.md` — Google Sheets integration test setup. **Read
+  this before attempting any Google Sheets automation via the
+  Claude-in-Chrome plugin**: in the `tradingstrategy.ai` Workspace
+  environment we've tested, sharing a sheet with a service account
+  cannot be completed by Claude-in-Chrome and must be performed
+  manually by the operator. Other Workspace orgs may behave differently.
+
 ## Skills
 
 Repo-local skills live as folders under `.claude/skills`.
@@ -109,6 +121,7 @@ No test plan or verification section. Use Markdown formatting, headings.
 
 ### Python rules
 
+- We use Python 3.14
 - For data structures, prefer `dataclass(slots=True)`
 - Use threaded instead of async Python code
 - Always type hint function arguments and return values

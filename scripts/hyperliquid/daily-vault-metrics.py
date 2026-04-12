@@ -43,14 +43,20 @@ Environment variables:
   Hypercore data is written here and then goes through the standard
   cleaning pipeline.
   Default: ~/.tradingstrategy/vaults/vault-prices-1h.parquet
+- ``GS_SERVICE_ACCOUNT_FILE``: Optional Google service account JSON file for the
+  Hyperliquid review spreadsheet sync.
+- ``GS_SHEET_URL``: Optional Google Sheets URL for the Hyperliquid review spreadsheet.
+- ``GS_WORKSHEET_NAME``: Optional worksheet name for the Hyperliquid review spreadsheet.
+  Default: ``Hyperliquid vault review``
 
 """
 
-import datetime
 import logging
+import math
 import os
 from pathlib import Path
 
+from eth_defi.compat import native_datetime_utc_now
 from eth_defi.hyperliquid.constants import HYPERCORE_CHAIN_ID, HYPERLIQUID_DAILY_METRICS_DATABASE
 from eth_defi.hyperliquid.daily_metrics import run_daily_scan
 from eth_defi.hyperliquid.session import create_hyperliquid_session
@@ -58,9 +64,10 @@ from eth_defi.hyperliquid.vault_data_export import (
     merge_into_vault_database,
     open_and_merge_hypercore_prices,
 )
+from eth_defi.hyperliquid.vault_review_sync import VaultReviewRow, fetch_vault_review_statuses, sync_vault_review_sheet
 from eth_defi.research.wrangle_vault_prices import generate_cleaned_vault_datasets
 from eth_defi.utils import setup_console_logging
-from eth_defi.vault.vaultdb import DEFAULT_VAULT_DATABASE, DEFAULT_UNCLEANED_PRICE_DATABASE
+from eth_defi.vault.vaultdb import DEFAULT_UNCLEANED_PRICE_DATABASE, DEFAULT_VAULT_DATABASE
 
 logger = logging.getLogger(__name__)
 
@@ -89,11 +96,11 @@ def main():
     # Triggered by FULL_SCAN=1 env var, or automatically on the configured
     # weekday (default: Sunday, i.e. FULL_SCAN_WEEKDAY=6).
     full_scan_env = os.environ.get("FULL_SCAN", "").strip().lower()
-    if full_scan_env in ("1", "true", "yes"):
+    if full_scan_env in {"1", "true", "yes"}:
         full_scan = True
     else:
         full_scan_weekday = int(os.environ.get("FULL_SCAN_WEEKDAY", "6"))  # 0=Mon, 6=Sun
-        full_scan = datetime.date.today().weekday() == full_scan_weekday
+        full_scan = native_datetime_utc_now().date().weekday() == full_scan_weekday
 
     vault_db_path_str = os.environ.get("VAULT_DB_PATH")
     vault_db_path = Path(vault_db_path_str).expanduser() if vault_db_path_str else DEFAULT_VAULT_DATABASE
@@ -101,7 +108,11 @@ def main():
     uncleaned_path_str = os.environ.get("PARQUET_PATH")
     uncleaned_path = Path(uncleaned_path_str).expanduser() if uncleaned_path_str else DEFAULT_UNCLEANED_PRICE_DATABASE
 
-    print(f"Hyperliquid daily vault metrics pipeline")
+    gs_service_account_file = os.environ.get("GS_SERVICE_ACCOUNT_FILE", "").strip()
+    gs_sheet_url = os.environ.get("GS_SHEET_URL", "").strip()
+    gs_worksheet_name = os.environ.get("GS_WORKSHEET_NAME", "Hyperliquid vault review").strip()
+
+    print("Hyperliquid daily vault metrics pipeline")
     print(f"DuckDB path: {db_path}")
     if vault_addresses:
         print(f"Vault addresses: {', '.join(vault_addresses)}")
@@ -113,12 +124,16 @@ def main():
     print(f"Flow backfill days: {flow_backfill_days}")
     print(f"VaultDB path: {vault_db_path}")
     print(f"Uncleaned parquet path: {uncleaned_path}")
+    if gs_sheet_url or gs_service_account_file:
+        print(f"Google Sheet URL: {gs_sheet_url or '(missing)'}")
+        print(f"Google service account file: {gs_service_account_file or '(missing)'}")
+        print(f"Google worksheet name: {gs_worksheet_name}")
 
     # Create rate-limited session
     session = create_hyperliquid_session(requests_per_second=2.75)
 
     # Step 1: Scan and store in DuckDB
-    print(f"\nStep 1: Scanning Hyperliquid vaults...")
+    print("\nStep 1: Scanning Hyperliquid vaults...")
     db = run_daily_scan(
         session=session,
         db_path=db_path,
@@ -130,13 +145,44 @@ def main():
         full_scan=full_scan,
     )
 
+    metadata_df = None
+    sheet_fetch_failed = False
     try:
         vault_count = db.get_vault_count()
         print(f"Stored metrics for {vault_count} vaults in DuckDB")
+        metadata_df = db.get_all_vault_metadata()
+
+        # Step 1b: Pull the latest manual review decisions from the Google
+        # Sheet before we rebuild the pickle. If the sheet is unreachable
+        # (network error, credentials missing, rate-limited, etc.) we log a
+        # warning and pass ``None`` into the merge — merge_into_vault_database
+        # will then carry forward whatever _manual_review_status was already
+        # stored in the pickle, so a sheet outage never wipes human reviews.
+        #
+        # We also record the failure in ``sheet_fetch_failed`` so Step 5
+        # below skips its own ``sync_vault_review_sheet`` call. Step 5's
+        # own ``try/except`` would catch the re-hit as well, but skipping
+        # it keeps us from logging two warnings for the same symptom and
+        # avoids the (tiny) wasted work of serialising ~500 rows just to
+        # have the HTTP call fail on the same auth/network issue.
+        review_statuses: dict | None = None
+        if gs_sheet_url and gs_service_account_file:
+            try:
+                review_statuses = fetch_vault_review_statuses(
+                    sheet_url=gs_sheet_url,
+                    worksheet_name=gs_worksheet_name,
+                    service_account_file=Path(gs_service_account_file).expanduser(),
+                )
+                reviewed_count = sum(1 for status in review_statuses.values() if status is not None)
+                print(f"Fetched {reviewed_count} manual review decisions from Google Sheet ({len(review_statuses)} rows total)")
+            except Exception as exc:
+                logger.warning("Failed to fetch manual review statuses from Google Sheet: %s — merge will carry forward existing pickle values and Step 5 sheet sync will be skipped", exc)
+                review_statuses = None
+                sheet_fetch_failed = True
 
         # Step 2: Merge into VaultDatabase pickle
         print(f"\nStep 2: Merging into VaultDatabase at {vault_db_path}...")
-        vault_db = merge_into_vault_database(db, vault_db_path)
+        vault_db = merge_into_vault_database(db, vault_db_path, review_statuses=review_statuses)
         print(f"VaultDatabase now has {len(vault_db)} total vaults")
 
         # Step 3: Merge into uncleaned Parquet.
@@ -153,13 +199,77 @@ def main():
     # Step 4: Run the cleaning pipeline so Hypercore data goes through
     # the same cleaning steps as EVM vaults (outlier share price smoothing,
     # return cleaning, TVL-based filtering, etc.)
-    print(f"\nStep 4: Running cleaning pipeline...")
+    print("\nStep 4: Running cleaning pipeline...")
     generate_cleaned_vault_datasets(
         vault_db_path=vault_db_path,
         price_df_path=uncleaned_path,
     )
 
-    print(f"\nAll ok")
+    if gs_sheet_url or gs_service_account_file:
+        if not gs_sheet_url or not gs_service_account_file:
+            message = "Google Sheets sync requires both GS_SHEET_URL and GS_SERVICE_ACCOUNT_FILE when enabled"
+            raise RuntimeError(message)
+        assert metadata_df is not None
+
+        if sheet_fetch_failed:
+            # The earlier fetch_vault_review_statuses() call in Step 1b
+            # already hit a network/auth/rate-limit problem against this
+            # exact sheet. Retrying sync_vault_review_sheet() now would
+            # almost certainly trip the same failure and abort the whole
+            # pipeline, so skip it instead — the fresh metrics DataFrame
+            # is already safe in the pickle and will be pushed on the
+            # next run when the sheet is reachable again.
+            print("\nStep 5: Google Sheets sync skipped (Step 1b fetch failed; sheet is presumed unreachable)")
+        else:
+            print("\nStep 5: Syncing Hyperliquid review spreadsheet...")
+
+            def _optional_float(value: object) -> float | None:
+                if value is None:
+                    return None
+                if isinstance(value, float) and math.isnan(value):
+                    return None
+                return float(value)
+
+            def _optional_int(value: object) -> int | None:
+                if value is None:
+                    return None
+                if isinstance(value, float) and math.isnan(value):
+                    return None
+                return int(value)
+
+            review_rows = [
+                VaultReviewRow(
+                    name=str(row["name"]),
+                    address=str(row["vault_address"]).lower(),
+                    apy_1m=_optional_float(row["apr"]),
+                    tvl=_optional_float(row["tvl"]),
+                    followers=_optional_int(row["follower_count"]),
+                    review_status=None,
+                )
+                for _, row in metadata_df.iterrows()
+            ]
+            # Defence in depth: even when Step 1b succeeded, the push
+            # side can fail for independent reasons (rate limit on write,
+            # sheet temporarily locked for editing, quota exhaustion,
+            # etc.). Treat those the same as the Step 1b fallback — log
+            # a warning and let the rest of the pipeline report success,
+            # because the data is already durable in the pickle and will
+            # be pushed on the next run.
+            try:
+                sync_vault_review_sheet(
+                    rows=review_rows,
+                    sheet_url=gs_sheet_url,
+                    worksheet_name=gs_worksheet_name,
+                    service_account_file=Path(gs_service_account_file).expanduser(),
+                )
+                print(f"Synced {len(review_rows):,} Hyperliquid vault rows to Google Sheets")
+            except Exception as exc:
+                logger.warning("Failed to push fresh metrics to Google Sheet: %s — the pipeline's pickle is still up to date, retry on the next run", exc)
+                print("Step 5: Google Sheets push failed (logged); pickle is up to date and will be retried on the next run")
+    else:
+        print("\nStep 5: Google Sheets sync skipped (set GS_SHEET_URL and GS_SERVICE_ACCOUNT_FILE to enable)")
+
+    print("\nAll ok")
 
 
 if __name__ == "__main__":
