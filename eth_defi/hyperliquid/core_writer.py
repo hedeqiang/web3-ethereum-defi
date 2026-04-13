@@ -800,6 +800,10 @@ def build_hypercore_deposit_phase1(
         fn1 = build_hypercore_deposit_phase1(lagoon_vault, evm_usdc_amount=1_000_000)
         tx_hash = fn1.transact({"from": asset_manager})
 
+        # WARNING: Escrow clearance alone can be a misleading success signal
+        # for fast-settling deposits. If the caller needs to prove that a
+        # specific USDC amount reached HyperCore spot, pass expected_usdc and,
+        # when available, a true pre-phase baseline to wait_for_evm_escrow_clear().
         # Wait for escrow to clear
         wait_for_evm_escrow_clear(session, user=safe_address)
 
