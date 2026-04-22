@@ -935,15 +935,26 @@ def calculate_period_metrics(
             samples_end_at=samples_end_at,
         )
 
-    cagr_gross = base_gross ** (1 / years) - 1
-    cagr_net = base_net ** (1 / years) - 1
-
     # Cap CAGR at a reasonable maximum.
     # Short-lived vaults (e.g. 14 days with 600% return) extrapolate to
     # absurd annual rates via (1+r)^(365/days). A 10,000% (100x) annual cap
     # is generous enough for any legitimate vault while preventing
     # astronomical numbers from polluting rankings.
     max_cagr = 100.0  # 10,000%
+
+    # The exponentiation can overflow for extreme base/years combinations
+    # (e.g. huge return over a very short period). Catch OverflowError
+    # and clamp to max_cagr.
+    try:
+        cagr_gross = base_gross ** (1 / years) - 1
+    except OverflowError:
+        cagr_gross = max_cagr
+
+    try:
+        cagr_net = base_net ** (1 / years) - 1
+    except OverflowError:
+        cagr_net = max_cagr
+
     cagr_gross = min(cagr_gross, max_cagr)
     cagr_net = min(cagr_net, max_cagr)
 
