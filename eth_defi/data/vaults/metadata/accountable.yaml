@@ -13,7 +13,7 @@ fee_description: |
   Fee information is not publicly exposed on-chain. Accountable vaults do not have
   explicit fee getter functions available for reading management or performance fees.
 links:
-  homepage: https://www.accountable.capital/
+  homepage: https://yield.accountable.capital/
   app: https://yield.accountable.capital/
   twitter: https://x.com/AccountableData
   github:
