@@ -287,4 +287,4 @@ class AccountableVault(ERC4626Vault):
 
     def get_link(self, referral: str | None = None) -> str:
         """Return the yield app link."""
-        return "https://yield.accountable.capital/vaults"
+        return f"https://yield.accountable.capital/vaults/{self.vault_address}"
