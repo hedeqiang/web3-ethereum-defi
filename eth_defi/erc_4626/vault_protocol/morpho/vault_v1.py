@@ -19,10 +19,11 @@ from web3 import Web3
 
 from eth_defi.chain import get_chain_name
 from eth_defi.erc_4626.vault import ERC4626HistoricalReader, ERC4626Vault
+from eth_defi.erc_4626.vault_protocol.morpho.flag_analytics import analyze_morpho_flags
 from eth_defi.erc_4626.vault_protocol.morpho.offchain_metadata import MorphoVaultData, fetch_morpho_vault_data
 from eth_defi.event_reader.multicall_batcher import EncodedCall, EncodedCallResult
 from eth_defi.types import Percent
-from eth_defi.vault.base import VaultHistoricalReader, VaultHistoricalRead
+from eth_defi.vault.base import VaultHistoricalRead, VaultHistoricalReader
 from eth_defi.vault.flag import VaultFlag
 
 logger = logging.getLogger(__name__)
@@ -204,6 +205,28 @@ class MorphoV1Vault(ERC4626Vault):
         if not data:
             return set()
         return {w["type"] for w in data.get("market_warnings", [])}
+
+    def get_notes(self) -> str | None:
+        """Return a human-readable note about RED-level Morpho warnings, if any.
+
+        Checks the hardcoded flag table first (via the base class), then falls back
+        to a dynamically generated note from the Morpho Blue GraphQL API when RED
+        warnings are present.
+
+        The generated text follows the form::
+
+            "Morpho has flagged this vault with the following issues: bad_debt_unrealized, short_timelock"
+
+        :return:
+            Note string, or ``None`` if no hardcoded note and no RED warnings.
+        """
+        note = super().get_notes()
+        if note:
+            return note
+        data = self.morpho_offchain_data
+        if data is not None:
+            return analyze_morpho_flags(data).note
+        return None
 
     def get_flags(self) -> set[VaultFlag]:
         """Get vault flags, adding ``morpho_issues`` when RED warnings are detected.
