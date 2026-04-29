@@ -203,7 +203,7 @@ def fetch_vault_deposits(
     current_end_ms = int(end_time.timestamp() * 1000)
     start_ms = int(start_time.timestamp() * 1000)
 
-    logger.info(
+    logger.debug(
         "Fetching vault events for %s from %s to %s",
         vault_address,
         start_time.isoformat(),
@@ -261,7 +261,7 @@ def fetch_vault_deposits(
     # Sort by timestamp ascending for chronological processing
     all_events.sort(key=lambda e: e.timestamp)
 
-    logger.info("Fetched %d total vault events for %s", len(all_events), vault_address)
+    logger.debug("Fetched %d total vault events for %s", len(all_events), vault_address)
 
     yield from all_events
 

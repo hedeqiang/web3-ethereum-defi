@@ -107,7 +107,7 @@ class ProxyStateManager:
                     failure_count=entry_data.get("failure_count", 1),
                 )
 
-            logger.info(
+            logger.debug(
                 "Loaded %d failed proxy entries from %s",
                 len(self._failed_proxies),
                 self.state_path,
@@ -197,7 +197,7 @@ class ProxyStateManager:
             del self._failed_proxies[proxy_id]
 
         if expired:
-            logger.info("Cleaned up %d expired proxy failure entries", len(expired))
+            logger.debug("Cleaned up %d expired proxy failure entries", len(expired))
             self.save()
 
         return len(expired)
@@ -391,7 +391,7 @@ def _parse_proxy_results(results: list[dict]) -> list[WebshareProxy]:
         for entry in results
         if entry.get("valid", False)
     ]
-    logger.info("Filtered to %d valid proxies", len(proxies))
+    logger.debug("Filtered to %d valid proxies", len(proxies))
     return proxies
 
 
@@ -413,7 +413,7 @@ def fetch_proxy_list(api_key: str, mode: str = "backbone") -> list[WebshareProxy
 
     data = resp.json()
     results = data.get("results", [])
-    logger.info("Webshare API returned %d proxies (mode=%s)", len(results), mode)
+    logger.debug("Webshare API returned %d proxies (mode=%s)", len(results), mode)
 
     proxies = _parse_proxy_results(results)
     if not proxies:
@@ -510,7 +510,7 @@ def load_proxy_rotator() -> ProxyRotator | None:
     blocked_count = total_count - len(proxies)
 
     if blocked_count > 0:
-        logger.info(
+        logger.debug(
             "Filtered out %d blocked proxies (%d remaining)",
             blocked_count,
             len(proxies),
@@ -524,7 +524,14 @@ def load_proxy_rotator() -> ProxyRotator | None:
         return None
 
     random.shuffle(proxies)
-    logger.info("Randomised order of %d proxies", len(proxies))
+    logger.debug("Randomised order of %d proxies", len(proxies))
+    logger.info(
+        "Loaded Webshare proxy rotator with %d usable proxies (mode=%s, blocked=%d/%d)",
+        len(proxies),
+        mode,
+        blocked_count,
+        total_count,
+    )
 
     return ProxyRotator(
         proxies=proxies,
@@ -574,7 +581,7 @@ def load_proxy_urls(api_key: str | None = None) -> list[str]:
     blocked_count = total_count - len(proxies)
 
     if blocked_count > 0:
-        logger.info(
+        logger.debug(
             "Filtered out %d blocked proxies (%d remaining)",
             blocked_count,
             len(proxies),

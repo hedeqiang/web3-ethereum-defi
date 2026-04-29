@@ -689,9 +689,10 @@ def run_high_freq_scan(
     if vault_summaries is None:
         raise RuntimeError("Failed to fetch vault summaries after 3 attempts")
 
-    logger.info("Fetched %d total vaults from stats-data API", len(vault_summaries))
+    logger.debug("Fetched %d total vaults from stats-data API", len(vault_summaries))
 
     # Filter vaults (same logic as daily pipeline)
+    wind_down_count = 0
     if vault_addresses is not None:
         address_set = {a.lower() for a in vault_addresses}
         filtered = [s for s in vault_summaries if s.vault_address.lower() in address_set]
@@ -709,16 +710,22 @@ def run_high_freq_scan(
             filtered_addrs = {s.vault_address.lower() for s in filtered}
             wind_down = [s for s in vault_summaries if s.vault_address.lower() in recently_tracked and s.vault_address.lower() not in filtered_addrs]
             filtered.extend(wind_down)
-            if wind_down:
-                logger.info(
+            wind_down_count = len(wind_down)
+            if wind_down_count:
+                logger.debug(
                     "Added %d recently-tracked vaults below TVL threshold for wind-down bars",
-                    len(wind_down),
+                    wind_down_count,
                 )
 
         filtered.sort(key=lambda s: float(s.tvl), reverse=True)
         filtered = filtered[:max_vaults]
 
-    logger.info("Processing %d vaults", len(filtered))
+    logger.info(
+        "Processing %d HF Hyperliquid vaults out of %d stats-data vaults (wind-down=%d)",
+        len(filtered),
+        len(vault_summaries),
+        wind_down_count,
+    )
 
     # Parallel fetch with proxy-aware session pool
     if filtered:

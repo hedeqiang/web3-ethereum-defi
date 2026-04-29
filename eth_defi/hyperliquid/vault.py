@@ -497,7 +497,7 @@ def fetch_all_vaults(
     response.raise_for_status()
     data = response.json()
 
-    logger.info(f"Fetched {len(data)} vaults from Hyperliquid")
+    logger.debug("Fetched %d vaults from Hyperliquid", len(data))
 
     def _parse_vault(item: dict) -> VaultSummary:
         """Parse a single vault item from the API response."""

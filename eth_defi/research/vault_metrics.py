@@ -21,7 +21,7 @@ from ffn.utils import fmtn, fmtp
 from plotly.graph_objects import Figure
 from plotly.subplots import make_subplots
 from slugify import slugify
-from tqdm.auto import tqdm
+from tqdm_loggable.auto import tqdm
 
 from eth_defi.chain import get_chain_name
 from eth_defi.compat import native_datetime_utc_now
@@ -1624,7 +1624,7 @@ def calculate_lifetime_metrics(
     month_ago = df.index.max() - pd.Timedelta(days=30)
     three_months_ago = df.index.max() - pd.Timedelta(days=90)
 
-    # Enable tqdm progress bar for pandas
+    # Enable server-side loggable progress bar for pandas runs.
     tqdm.pandas(desc="Calculating vault performance metrics")
 
     slugify_vaults(

@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 from eth_typing import HexAddress
 from IPython.display import display
-from tqdm.auto import tqdm
+from tqdm_loggable.auto import tqdm
 
 from eth_defi.chain import get_chain_name
 from eth_defi.token import is_stablecoin_like
@@ -291,6 +291,9 @@ def clean_returns(
 
     """
 
+    # Kept for API compatibility with notebook and script callers.
+    del display
+
     returns_df = prices_df
 
     high_returns_mask = returns_df[returns_col] > outlier_threshold
@@ -299,15 +302,13 @@ def clean_returns(
     # Sort by return value (highest first)
     outlier_returns = outlier_returns.sort_values(by=returns_col, ascending=False)
 
-    # Display the results
-    logger(f"Found {len(outlier_returns)} outlier returns > {outlier_threshold:%}")
-    display(outlier_returns[["name", "id", returns_col, "share_price", "total_assets"]].head(3))
-
-    # Show the distribution of these outliers by vault
-    outlier_counts = outlier_returns.groupby("name").size().sort_values(ascending=False)
-    print("\nTop outlier too high return row count by vault:")
-
-    display(outlier_counts.head(3))
+    # Show a compact summary instead of dumping sample DataFrames to logs.
+    if len(outlier_returns) > 0:
+        outlier_counts = outlier_returns.groupby("name").size().sort_values(ascending=False)
+        top_outlier_counts = ", ".join(f"{name}={count:,}" for name, count in outlier_counts.head(3).items())
+        logger(f"Found {len(outlier_returns):,} outlier returns > {outlier_threshold:%}; top vaults by count: {top_outlier_counts}")
+    else:
+        logger(f"Found 0 outlier returns > {outlier_threshold:%}")
 
     # Clean up obv too high returns
     returns_df.loc[returns_df[returns_col] > outlier_threshold, returns_col] = 0

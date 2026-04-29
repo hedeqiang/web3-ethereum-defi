@@ -32,7 +32,6 @@ import numpy as np
 import pandas as pd
 import datetime
 from pathlib import Path
-from IPython.display import display
 
 from eth_defi.token import is_stablecoin_like
 
@@ -179,20 +178,13 @@ def main(
     # --------------------------------------------------------------------
     vault_db = VaultDatabase.read(vault_db_path)
     prices_df = pd.read_parquet(parquet_path)
-    print(f"We have {len(vault_db):,} vaults in the database and {len(prices_df):,} price rows.")
-
     chains = prices_df["chain"].unique()
 
-    print(f"The report data is dated {prices_df.index.min()} - {prices_df.index.max()}")
-    print(f"We have {len(prices_df):,} price rows and {len(vault_db)} vault metadata entries for {len(chains)} chains")
+    print(f"Loaded {len(vault_db):,} vault metadata entries and {len(prices_df):,} price rows across {len(chains):,} chains from {prices_df.index.min()} to {prices_df.index.max()}; price columns: {len(prices_df.columns):,}")
 
     # sample_vault = next(iter(vault_db.values()))
     # print("We have vault metadata keys: ", ", ".join(c for c in sample_vault.keys()))
     # display(pd.Series(sample_vault))
-
-    print("We have prices DataFrame columns: ", ", ".join(c for c in prices_df.columns))
-    print("DataFrame sample:")
-    display(prices_df.head(3))
 
     errors = cross_check_data(
         vault_db,
@@ -209,13 +201,13 @@ def main(
 
     # Filter out prices to contain only data for vaults we are interested in
     prices_df = prices_df.loc[prices_df["id"].isin(allowed_vault_ids)]
-    print(f"Filtered out prices have {len(prices_df):,} rows")
+    print(f"Filtered stablecoin-denominated price data has {len(prices_df):,} rows")
 
     raw_returns_df = returns_df = calculate_hourly_returns_for_all_vaults(prices_df)
 
     lifetime_data_df = calculate_lifetime_metrics(returns_df, vault_db)
 
-    print(f"Lifetime data has {len(lifetime_data_df):,} rows and columns: ", ", ".join(c for c in lifetime_data_df.columns))
+    print(f"Calculated lifetime metrics for {len(lifetime_data_df):,} vaults with {len(lifetime_data_df.columns):,} columns")
 
     # Don't export all crappy vaults to keep the data more compact
     # Use peak TVL so we will export old vaults too which were popular in the past
@@ -232,7 +224,7 @@ def main(
 
     results = find_non_serializable_paths(output_data)
     if results:
-        print("❌ Found non-serializable values in output data:")
+        print("Found non-serializable values in output data:")
         for path, issue in results:
             path_str = " -> ".join(str(p) for p in path)
             print(f" - Path: {path_str}: {issue}")
@@ -243,7 +235,7 @@ def main(
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(output_data, f, indent=2, ensure_ascii=False, allow_nan=False)
 
-    print(f"✅ Exported {len(vaults):,} to {output_path}")
+    print(f"Exported {len(vaults):,} vault rows to {output_path}")
 
 
 if __name__ == "__main__":

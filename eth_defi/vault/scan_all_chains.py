@@ -1367,7 +1367,7 @@ def run_scan_tick(
     failed_count = sum(1 for r in results.values() if r.status == "failed")
     skipped_count = sum(1 for r in results.values() if r.status == "skipped")
 
-    logger.info("=" * 80)
+    logger.debug("=" * 80)
     logger.info("Final summary: %d success, %d failed, %d skipped", success_count, failed_count, skipped_count)
     if failed_count > 0:
         logger.warning("Failed chains:")
@@ -1489,7 +1489,7 @@ def main():
     else:
         test_chain_names = None
 
-    logger.info("=" * 80)
+    logger.debug("=" * 80)
     logger.info("Starting multi-chain vault scan")
     logger.info("SCAN_PRICES: %s, SCAN_HYPERCORE: %s, SCAN_GRVT: %s, SCAN_LIGHTER: %s, RETRY_COUNT: %d, MAX_WORKERS: %d, FREQUENCY: %s", scan_prices, scan_hypercore, scan_grvt, scan_lighter, retry_count, max_workers, frequency)
     logger.info("PIPELINE_DATA_DIR: %s", data_dir)
@@ -1501,7 +1501,7 @@ def main():
         logger.info("DISABLE_CHAINS: %s", disable_chains_str)
     if force_rescan:
         logger.info("FORCE_RESCAN: true")
-    logger.info("=" * 80)
+    logger.debug("=" * 80)
 
     # Build chain configurations
     all_chains = build_chain_configs()

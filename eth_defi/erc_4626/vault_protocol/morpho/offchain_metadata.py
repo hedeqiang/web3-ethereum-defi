@@ -300,6 +300,8 @@ def fetch_morpho_vault_data(
     checksum_address = Web3.to_checksum_address(vault_address)
     cache_key = f"{cache_path}:{chain_id}:{address_lower}"
 
+    logger.info("Resolving Morpho GraphQL data for vault %s on chain %d", checksum_address, chain_id)
+
     # 1. In-process cache hit
     if cache_key in _cached_vault_data:
         return _cached_vault_data[cache_key]
