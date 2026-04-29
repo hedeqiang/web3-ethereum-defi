@@ -250,7 +250,7 @@ def main() -> None:
     variables, refreshes matching rows, and writes the pickle atomically using
     :py:meth:`eth_defi.vault.vaultdb.VaultDatabase.write`.
     """
-    setup_console_logging(default_log_level=os.environ.get("LOG_LEVEL", "info"))
+    setup_console_logging(default_log_level="info")
 
     protocol_id = os.environ.get("PROTOCOL_ID")
     if not protocol_id:
