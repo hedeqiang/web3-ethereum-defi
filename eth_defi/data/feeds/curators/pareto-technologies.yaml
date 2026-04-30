@@ -4,5 +4,5 @@ role: curator
 website: https://paretotechnologies.com
 linkedin: pareto-technologies-llc
 rss: https://paretotechnologies.beehiiv.com/feed.xml
-rss-failure-at: 2026-04-10
+rss-failure-at: 2026-04-30
 rss-failure-exception-message: "Feed parse failed for https://paretotechnologies.beehiiv.com/feed.xml: <unknown>:109:918: not well-formed (invalid token)"
