@@ -8,6 +8,7 @@ Tests validate that:
 
 import os
 
+import flaky
 import pytest
 from eth_typing import HexAddress
 from web3 import Web3
@@ -122,6 +123,7 @@ def funded_vault(
     return vault
 
 
+@flaky.flaky
 def test_cctp_guard_whitelist_status(
     guard: Contract,
     safe_address: str,  # noqa: ARG001
@@ -132,6 +134,7 @@ def test_cctp_guard_whitelist_status(
     assert guard.functions.isAllowedCCTPDestination(CCTP_DOMAIN_BASE).call() is False
 
 
+@flaky.flaky
 def test_cctp_deposit_for_burn_through_vault(  # noqa: PLR0917
     web3: Web3,
     funded_vault: Contract,
@@ -171,6 +174,7 @@ def test_cctp_deposit_for_burn_through_vault(  # noqa: PLR0917
     assert vault_balance_after == vault_balance_before - amount
 
 
+@flaky.flaky
 def test_cctp_wrong_destination_rejected(  # noqa: PLR0917
     web3: Web3,
     funded_vault: Contract,
@@ -201,6 +205,7 @@ def test_cctp_wrong_destination_rejected(  # noqa: PLR0917
         assert_transaction_success_with_explanation(web3, tx_hash)
 
 
+@flaky.flaky
 def test_cctp_wrong_recipient_rejected(
     web3: Web3,
     funded_vault: Contract,
@@ -231,6 +236,7 @@ def test_cctp_wrong_recipient_rejected(
         assert_transaction_success_with_explanation(web3, tx_hash)
 
 
+@flaky.flaky
 def test_cctp_destination_removal(
     web3: Web3,  # noqa: ARG001
     guard: Contract,

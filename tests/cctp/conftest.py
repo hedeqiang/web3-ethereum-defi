@@ -29,10 +29,11 @@ def ethereum_usdc_whale() -> HexAddress:
 
 @pytest.fixture(scope="module")
 def anvil_ethereum_fork(ethereum_usdc_whale) -> AnvilLaunch:
-    """Create a testable fork of live Ethereum mainnet."""
+    """Create a testable fork of live Ethereum mainnet at a fixed block for reproducibility."""
     launch = fork_network_anvil(
         JSON_RPC_ETHEREUM,
         unlocked_addresses=[ethereum_usdc_whale],
+        fork_block_number=24_991_798,
     )
     try:
         yield launch
