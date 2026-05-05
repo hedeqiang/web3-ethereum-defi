@@ -2110,9 +2110,12 @@ LAGOON_BEACON_PROXY_FACTORIES = {
         "abi": "lagoon/BeaconProxyFactory.json",
         "address": "0xC953Fd298FdfA8Ed0D38ee73772D3e21Bf19c61b",
     },
-    # Arbitrum
-    # 42161: "0x9De724B0efEe0FbA07FE21a16B9Bf9bBb5204Fb4",
-    # Arbitrum new
+    # Arbitrum — currently non-functional for new vault deployments.
+    # The ProtocolRegistry at 0x6dA4D1859bA1d02D095D2246142CdAd52233e27C was upgraded
+    # to a new implementation with a different storage layout, but the existing storage
+    # was never migrated.  As a result defaultLogic() and protocolFeeReceiver() both
+    # revert, causing createVaultProxy() to fail.
+    # Old factory: 0x9De724B0efEe0FbA07FE21a16B9Bf9bBb5204Fb4 (same registry, also broken)
     # Impl https://arbiscan.io/address/0xbb2de8e36eb36dbc20d71c503711763a4be3b1b2#readContract
     # Proxy https://arbiscan.io/address/0xb1ee4f77a1691696a737ab9852e389cf4cb1f1f5#writeProxyContract#F1
     42161: {
