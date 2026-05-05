@@ -3,16 +3,6 @@
 Verifies that:
 1. The raw helper produces the same Safe address on Base and Arbitrum forks
 2. The Lagoon automated deployment produces the same Safe address when given a salt nonce
-
-.. note::
-
-    The Lagoon vault test uses Base + Ethereum rather than Base + Arbitrum.
-    The Arbitrum ``ProtocolRegistry`` at ``0x6dA4D1859bA1d02D095D2246142CdAd52233e27C``
-    was upgraded to a new implementation whose storage layout differs from the
-    original, but without migrating the existing storage.  As a result
-    ``defaultLogic()`` and ``protocolFeeReceiver()`` both revert on Arbitrum,
-    making ``createVaultProxy`` impossible.  Ethereum uses the same factory
-    pattern and its registry is correctly initialised.
 """
 
 import logging
@@ -41,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 JSON_RPC_BASE = os.environ.get("JSON_RPC_BASE")
 JSON_RPC_ARBITRUM = os.environ.get("JSON_RPC_ARBITRUM")
-JSON_RPC_ETHEREUM = os.environ.get("JSON_RPC_ETHEREUM")
 
 pytestmark = pytest.mark.skipif(
     not JSON_RPC_BASE or not JSON_RPC_ARBITRUM,
@@ -103,26 +92,6 @@ def web3_arbitrum(anvil_arbitrum) -> Web3:
         default_http_timeout=(3, 250.0),
     )
     assert web3.eth.chain_id == 42161
-    return web3
-
-
-@pytest.fixture()
-def anvil_ethereum(request) -> AnvilLaunch:
-    """Ethereum mainnet fork."""
-    launch = fork_network_anvil(JSON_RPC_ETHEREUM)
-    try:
-        yield launch
-    finally:
-        launch.close(log_level=logging.ERROR)
-
-
-@pytest.fixture()
-def web3_ethereum(anvil_ethereum) -> Web3:
-    web3 = create_multi_provider_web3(
-        anvil_ethereum.json_rpc_url,
-        default_http_timeout=(3, 250.0),
-    )
-    assert web3.eth.chain_id == 1
     return web3
 
 
@@ -190,29 +159,16 @@ def test_deterministic_safe_same_address_base_and_arbitrum(
     assert safe_arbitrum.retrieve_owners() == [Web3.to_checksum_address(a) for a in owners]
 
 
-@pytest.mark.skipif(
-    not JSON_RPC_BASE or not JSON_RPC_ETHEREUM,
-    reason="JSON_RPC_BASE and JSON_RPC_ETHEREUM environment variables required",
-)
-def test_lagoon_deterministic_safe_base_and_ethereum(
+def test_lagoon_deterministic_safe_base_and_arbitrum(
     web3_base: Web3,
-    web3_ethereum: Web3,
+    web3_arbitrum: Web3,
     deployer: LocalAccount,
 ):
-    """Deploy Lagoon automated vaults on Base and Ethereum with deterministic Safe.
+    """Deploy Lagoon automated vaults on Base and Arbitrum with deterministic Safe.
 
     - Both deployments use the same salt nonce
     - Verify the Safe addresses from deploy_automated_lagoon_vault() are identical across chains
     - Verify the vault addresses are (expectedly) different
-
-    .. note::
-
-        Uses Base + Ethereum rather than Base + Arbitrum.
-        The Arbitrum ``ProtocolRegistry`` was upgraded to an implementation with a
-        different storage layout without migrating storage.  As a result
-        ``defaultLogic()`` reverts on Arbitrum, so ``createVaultProxy`` always
-        fails there.  Ethereum uses the same ``OptinProxyFactory`` pattern and its
-        registry is correctly initialised.
 
     .. note::
 
@@ -224,11 +180,11 @@ def test_lagoon_deterministic_safe_base_and_ethereum(
     salt_nonce = 42
 
     deployer_wallet_base = HotWallet(deployer)
-    deployer_wallet_eth = HotWallet(deployer)
+    deployer_wallet_arb = HotWallet(deployer)
 
     # Fund deployer on both chains
     web3_base.provider.make_request("anvil_setBalance", [deployer.address, hex(100 * 10**18)])
-    web3_ethereum.provider.make_request("anvil_setBalance", [deployer.address, hex(100 * 10**18)])
+    web3_arbitrum.provider.make_request("anvil_setBalance", [deployer.address, hex(100 * 10**18)])
 
     asset_manager = deployer.address
     safe_owners = [OWNER_1, OWNER_2]
@@ -256,18 +212,18 @@ def test_lagoon_deterministic_safe_base_and_ethereum(
     base_vault_address = base_deploy.vault.address
     logger.info("Base: Safe=%s, Vault=%s", base_safe_address, base_vault_address)
 
-    # Deploy on Ethereum
-    deployer_wallet_eth.sync_nonce(web3_ethereum)
-    eth_params = LagoonDeploymentParameters(
-        underlying=USDC_NATIVE_TOKEN[1],
+    # Deploy on Arbitrum
+    deployer_wallet_arb.sync_nonce(web3_arbitrum)
+    arb_params = LagoonDeploymentParameters(
+        underlying=USDC_NATIVE_TOKEN[42161],
         name="Test Vault",
         symbol="TV",
     )
-    eth_deploy = deploy_automated_lagoon_vault(
-        web3=web3_ethereum,
-        deployer=deployer_wallet_eth,
+    arb_deploy = deploy_automated_lagoon_vault(
+        web3=web3_arbitrum,
+        deployer=deployer_wallet_arb,
         asset_manager=asset_manager,
-        parameters=eth_params,
+        parameters=arb_params,
         safe_owners=safe_owners,
         safe_threshold=2,
         uniswap_v2=None,
@@ -275,12 +231,12 @@ def test_lagoon_deterministic_safe_base_and_ethereum(
         any_asset=True,
         safe_salt_nonce=salt_nonce,
     )
-    eth_safe_address = eth_deploy.vault.safe_address
-    eth_vault_address = eth_deploy.vault.address
-    logger.info("Ethereum: Safe=%s, Vault=%s", eth_safe_address, eth_vault_address)
+    arb_safe_address = arb_deploy.vault.safe_address
+    arb_vault_address = arb_deploy.vault.address
+    logger.info("Arbitrum: Safe=%s, Vault=%s", arb_safe_address, arb_vault_address)
 
     # Safe addresses must be the same
-    assert base_safe_address == eth_safe_address, f"Safe addresses differ: Base={base_safe_address}, Ethereum={eth_safe_address}"
+    assert base_safe_address == arb_safe_address, f"Safe addresses differ: Base={base_safe_address}, Arbitrum={arb_safe_address}"
 
     # Vault addresses should be different (different chain, different init code)
-    assert base_vault_address != eth_vault_address, "Vault addresses unexpectedly identical across chains"
+    assert base_vault_address != arb_vault_address, "Vault addresses unexpectedly identical across chains"
