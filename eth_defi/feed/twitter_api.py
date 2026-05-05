@@ -455,24 +455,42 @@ def _format_rate_limit_reset(exc: tweepy.TooManyRequests) -> str:
         Human-readable retry hint, or an empty string if no header was present.
     """
 
+    wait_seconds = _get_rate_limit_sleep_seconds(exc)
+    if wait_seconds is None:
+        return ""
+    return f" Retry after {wait_seconds} seconds."
+
+
+def _get_rate_limit_sleep_seconds(exc: tweepy.TooManyRequests) -> int | None:
+    """Read the X API retry delay from rate-limit headers.
+
+    :param exc:
+        Tweepy rate-limit exception.
+
+    :return:
+        Number of seconds to wait, or ``None`` if the API did not provide
+        usable rate-limit reset headers.
+    """
+
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", {}) or {}
 
     retry_after = headers.get("retry-after")
     if retry_after:
-        return f" Retry after {retry_after} seconds."
+        try:
+            return max(1, int(retry_after))
+        except ValueError:
+            return None
 
     reset = headers.get("x-rate-limit-reset")
     if not reset:
-        return ""
-
+        return None
     try:
         reset_at = datetime.datetime.fromtimestamp(int(reset), datetime.UTC).replace(tzinfo=None)
     except ValueError:
-        return ""
+        return None
 
-    wait_seconds = max(0, int((reset_at - native_datetime_utc_now()).total_seconds()))
-    return f" Retry after {reset_at.isoformat()} UTC ({wait_seconds} seconds)."
+    return max(1, int((reset_at - native_datetime_utc_now()).total_seconds()) + 1)
 
 
 def sync_x_list_members(
@@ -487,6 +505,7 @@ def sync_x_list_members(
     db: VaultPostDatabase,
     *,
     add_delay_seconds: float = 1.0,
+    rate_limit_sleep_max_seconds: float = 1200.0,
 ) -> int:
     """Sync X list membership with the provided Twitter handles.
 
@@ -550,38 +569,54 @@ def sync_x_list_members(
     id_to_handle = {user_id: handle for handle, user_id in handle_to_id.items()}
 
     for user_id in sorted(to_add):
-        try:
-            client_write.add_list_member(list_id, user_id)
-            added += 1
-            logger.info(
-                "Added @%s (%s) to X list %s (%d/%d missing members)",
-                id_to_handle.get(user_id, "unknown"),
-                user_id,
-                list_id,
-                added,
-                len(to_add),
-            )
-            if add_delay_seconds > 0:
-                time.sleep(add_delay_seconds)
-        except tweepy.TooManyRequests as e:
-            user_cache.save()
-            message = f"X API rate limit hit while adding @{id_to_handle.get(user_id, 'unknown')} ({user_id}) to list {list_id} after {added}/{len(to_add)} missing members were added.{_format_rate_limit_reset(e)} List sync state was not updated; rerun later to resume."
-            raise XRateLimitError(message) from e
-        except (tweepy.Unauthorized, tweepy.Forbidden) as e:
-            user_cache.save()
-            message = f"X API rejected list member writes while adding @{id_to_handle.get(user_id, 'unknown')} ({user_id}) to list {list_id}: {e}. Check OAuth 1.0a app permissions and access token ownership."
-            raise XApiError(message) from e
-        except tweepy.TweepyException as e:
-            failed += 1
-            logger.warning(
-                "Failed to add @%s (%s) to list %s: %s",
-                id_to_handle.get(user_id, "unknown"),
-                user_id,
-                list_id,
-                e,
-            )
-            if add_delay_seconds > 0:
-                time.sleep(add_delay_seconds)
+        while True:
+            try:
+                client_write.add_list_member(list_id, user_id)
+                added += 1
+                logger.info(
+                    "Added @%s (%s) to X list %s (%d/%d missing members)",
+                    id_to_handle.get(user_id, "unknown"),
+                    user_id,
+                    list_id,
+                    added,
+                    len(to_add),
+                )
+                if add_delay_seconds > 0:
+                    time.sleep(add_delay_seconds)
+                break
+            except tweepy.TooManyRequests as e:
+                user_cache.save()
+                wait_seconds = _get_rate_limit_sleep_seconds(e)
+                if wait_seconds is None or wait_seconds > rate_limit_sleep_max_seconds:
+                    message = f"X API rate limit hit while adding @{id_to_handle.get(user_id, 'unknown')} ({user_id}) to list {list_id} after {added}/{len(to_add)} missing members were added.{_format_rate_limit_reset(e)} List sync state was not updated; rerun later to resume."
+                    raise XRateLimitError(message) from e
+
+                logger.warning(
+                    "X API rate limit hit while adding @%s (%s) to list %s after %d/%d missing members; sleeping %.0f seconds before retrying",
+                    id_to_handle.get(user_id, "unknown"),
+                    user_id,
+                    list_id,
+                    added,
+                    len(to_add),
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+            except (tweepy.Unauthorized, tweepy.Forbidden) as e:
+                user_cache.save()
+                message = f"X API rejected list member writes while adding @{id_to_handle.get(user_id, 'unknown')} ({user_id}) to list {list_id}: {e}. Check OAuth 1.0a app permissions and access token ownership."
+                raise XApiError(message) from e
+            except tweepy.TweepyException as e:
+                failed += 1
+                logger.warning(
+                    "Failed to add @%s (%s) to list %s: %s",
+                    id_to_handle.get(user_id, "unknown"),
+                    user_id,
+                    list_id,
+                    e,
+                )
+                if add_delay_seconds > 0:
+                    time.sleep(add_delay_seconds)
+                break
 
     # Only persist the hash when every add succeeded.  When some fail due to
     # transient API errors the next cycle will detect the mismatch and retry.

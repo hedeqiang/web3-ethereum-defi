@@ -69,6 +69,8 @@ class PostScanConfig:
     sync_x_list: bool = False
     #: Delay between X list member write calls.
     x_list_add_delay_seconds: float = 1.0
+    #: Maximum automatic sleep after X API list-write rate limits.
+    x_list_rate_limit_sleep_max_seconds: float = 1200.0
     #: Limit number of sources per type (for test runs).
     limit: int | None = None
     #: Days after which an inactive Twitter account is considered dead.
@@ -170,6 +172,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                 config.twitter_bearer_token,
                 db_for_sync,
                 add_delay_seconds=config.x_list_add_delay_seconds,
+                rate_limit_sleep_max_seconds=config.x_list_rate_limit_sleep_max_seconds,
             )
             db_for_sync.save()
         finally:

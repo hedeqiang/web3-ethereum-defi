@@ -28,6 +28,8 @@ Optional environment variables:
 - ``MAPPINGS_DIR``: feeder YAML root, default ``eth_defi/data/feeds``
 - ``LOG_LEVEL``: logging level, default ``info``
 - ``X_LIST_ADD_DELAY_SECONDS``: delay between list member writes, default ``1``
+- ``X_LIST_RATE_LIMIT_SLEEP_MAX_SECONDS``: maximum automatic rate-limit sleep,
+  default ``1200``
 """
 
 import logging
@@ -102,6 +104,16 @@ def _get_x_list_add_delay_seconds() -> float:
     return float(os.environ.get("X_LIST_ADD_DELAY_SECONDS", "1"))
 
 
+def _get_x_list_rate_limit_sleep_max_seconds() -> float:
+    """Read the maximum automatic X API rate-limit sleep.
+
+    :return:
+        Maximum sleep in seconds.
+    """
+
+    return float(os.environ.get("X_LIST_RATE_LIMIT_SLEEP_MAX_SECONDS", "1200"))
+
+
 def _get_x_list_id() -> str:
     """Resolve the target X list ID.
 
@@ -147,6 +159,7 @@ def main() -> None:
         logger.error("%s", e)
         raise SystemExit(1) from None
     add_delay_seconds = _get_x_list_add_delay_seconds()
+    rate_limit_sleep_max_seconds = _get_x_list_rate_limit_sleep_max_seconds()
 
     sources, feeders_skipped, aliases = load_post_sources(mappings_dir)
     handles = sorted({source.source_key for source in sources if source.source_type == "twitter"})
@@ -167,6 +180,7 @@ def main() -> None:
                 _get_required_env("TWITTER_BEARER_TOKEN"),
                 db,
                 add_delay_seconds=add_delay_seconds,
+                rate_limit_sleep_max_seconds=rate_limit_sleep_max_seconds,
             )
         except XRateLimitError as e:
             db.save()

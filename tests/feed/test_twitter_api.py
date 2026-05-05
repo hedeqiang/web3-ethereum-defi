@@ -7,7 +7,7 @@ import tweepy
 
 from eth_defi.feed import twitter_api
 from eth_defi.feed.database import VaultPostDatabase
-from eth_defi.feed.twitter_api import TwitterUserCache, XRateLimitError, sync_x_list_members
+from eth_defi.feed.twitter_api import TwitterUserCache, compute_handles_hash, sync_x_list_members
 
 LIST_ID = "123"
 LIST_MEMBER_PAGE_SIZE = 100
@@ -16,7 +16,7 @@ LIST_MEMBER_PAGE_SIZE = 100
 class _RateLimitedResponse:
     """Minimal response object for Tweepy rate-limit exceptions."""
 
-    headers: ClassVar[dict[str, str]] = {}
+    headers: ClassVar[dict[str, str]] = {"retry-after": "2"}
     reason = "Too Many Requests"
     status_code = 429
     text = "Too Many Requests"
@@ -28,11 +28,11 @@ class _RateLimitedResponse:
         return {"title": "Too Many Requests"}
 
 
-def test_sync_x_list_members_stops_on_rate_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Do not continue list writes after X returns a rate-limit error.
+def test_sync_x_list_members_waits_on_rate_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Wait for X rate-limit reset and retry the same list member.
 
-    A partial list sync must leave ``twitter_handles_hash`` untouched so that
-    the next operator run retries after reading the already-added list members.
+    A recoverable rate-limit response should not force the operator to manually
+    rerun the sync command when X provides a retry delay.
     """
 
     monkeypatch.setattr(
@@ -45,6 +45,7 @@ def test_sync_x_list_members_stops_on_rate_limit(monkeypatch: pytest.MonkeyPatch
     )
 
     add_calls: list[str] = []
+    sleep_calls: list[float] = []
 
     class FakeClient:
         """Fake Tweepy client for list member reads and writes."""
@@ -63,31 +64,34 @@ def test_sync_x_list_members_stops_on_rate_limit(monkeypatch: pytest.MonkeyPatch
 
         @staticmethod
         def add_list_member(list_id: str, user_id: str) -> None:
-            """Rate-limit the first write call."""
+            """Rate-limit the first write call, then allow retries."""
 
             assert list_id == LIST_ID
             add_calls.append(user_id)
-            raise tweepy.TooManyRequests(_RateLimitedResponse())
+            if add_calls == ["1"]:
+                raise tweepy.TooManyRequests(_RateLimitedResponse())
 
     monkeypatch.setattr(twitter_api.tweepy, "Client", FakeClient)
+    monkeypatch.setattr(twitter_api.time, "sleep", lambda seconds: sleep_calls.append(seconds))
 
     db = VaultPostDatabase(tmp_path / "posts.duckdb")
     try:
-        with pytest.raises(XRateLimitError, match="List sync state was not updated"):
-            sync_x_list_members(
-                LIST_ID,
-                ["alice", "bob"],
-                "consumer-key",
-                "consumer-secret",
-                "access-token",
-                "access-token-secret",
-                TwitterUserCache(tmp_path / "twitter-users.json"),
-                "bearer-token",
-                db,
-                add_delay_seconds=0,
-            )
+        added = sync_x_list_members(
+            LIST_ID,
+            ["alice", "bob"],
+            "consumer-key",
+            "consumer-secret",
+            "access-token",
+            "access-token-secret",
+            TwitterUserCache(tmp_path / "twitter-users.json"),
+            "bearer-token",
+            db,
+            add_delay_seconds=0,
+        )
 
-        assert add_calls == ["1"]
-        assert db.get_sync_state("twitter_handles_hash") is None
+        assert added == 2
+        assert add_calls == ["1", "1", "2"]
+        assert sleep_calls == [2]
+        assert db.get_sync_state("twitter_handles_hash") == compute_handles_hash(["alice", "bob"])
     finally:
         db.close()
