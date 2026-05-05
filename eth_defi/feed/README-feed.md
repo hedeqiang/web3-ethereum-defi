@@ -345,6 +345,44 @@ export MAX_PROXY_ROTATIONS=5
 poetry run python scripts/erc-4626/scan-vault-posts.py
 ```
 
+### Backfill new Twitter handles (Docker)
+
+After adding a batch of new feeder YAML files, newly tracked handles have
+no stored `last_post_published_at`.  The regular list-timeline scan falls back
+to individual reads for new handles, but only processes one cycle's worth.  Use
+[`scripts/feed/backfill-twitter-handles.py`](../../scripts/feed/backfill-twitter-handles.py)
+to explicitly fetch recent tweets for every handle whose timestamp is still
+`NULL`.
+
+```shell
+docker compose build vault-scanner
+docker compose run --rm -T --no-deps --entrypoint python post-scanner scripts/feed/backfill-twitter-handles.py
+```
+
+The script:
+
+1. Loads all Twitter sources from the feeder YAML files
+2. Resolves handles to X user IDs via the X API (uses the shared user cache)
+3. Queries the database for sources with `last_post_published_at = NULL`
+4. For each such handle, fetches up to `MAX_TWEETS_PER_HANDLE` (default 20) recent tweets
+5. Inserts posts and stamps `last_post_published_at`
+6. Prints a per-handle summary table
+
+Re-running the script is safe — handles that already have a timestamp are
+skipped immediately.
+
+Required environment variables:
+
+- `TWITTER_BEARER_TOKEN`
+
+Optional environment variables:
+
+- `DB_PATH`: DuckDB path, default `~/.tradingstrategy/vaults/vault-post-database.duckdb`
+- `MAPPINGS_DIR`: feeder YAML root, default `eth_defi/data/feeds`
+- `LOG_LEVEL`: logging level, default `info`
+- `MAX_TWEETS_PER_HANDLE`: tweets to fetch per handle, default `20`
+- `DELAY_BETWEEN_HANDLES`: seconds between X API calls, default `1`
+
 ### Sync X list only (Docker)
 
 Use [`scripts/feed/sync-x-list.py`](../../scripts/feed/sync-x-list.py) when you
@@ -540,6 +578,9 @@ The main files for this submodule are:
 - [`scripts/feed/sync-x-list.py`](../../scripts/feed/sync-x-list.py):
   standalone operator script for synchronising configured Twitter/X handles to
   an X list without collecting posts
+- [`scripts/feed/backfill-twitter-handles.py`](../../scripts/feed/backfill-twitter-handles.py):
+  one-shot backfill script that fetches recent tweets for all handles whose
+  `last_post_published_at` is still `NULL` (new handles not yet seen)
 - [`eth_defi/data/feeds/README.md`](../data/feeds/README.md): top-level feed
   folder summary and pointer back to this README
 
