@@ -77,6 +77,17 @@ def _format_datetime(value) -> str:
     return value.isoformat(sep=" ", timespec="seconds")
 
 
+def _format_duration(seconds: float | None) -> str:
+    """Format duration in seconds to human-readable string."""
+    if seconds is None:
+        return "-"
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"{minutes}m {secs:.0f}s"
+
+
 def _print_dashboard(summary) -> None:
     """Print run summary and per-source dashboard."""
 
@@ -87,10 +98,32 @@ def _print_dashboard(summary) -> None:
         ["Feeders all-skipped", summary.feeders_skipped],
         ["Posts fetched", summary.posts_fetched],
         ["Posts inserted", summary.posts_inserted],
+        ["Twitter method", summary.twitter_method or "-"],
+        ["Duration: RSS", _format_duration(summary.rss_duration_seconds)],
+        ["Duration: LinkedIn", _format_duration(summary.linkedin_duration_seconds)],
+        ["Duration: Twitter", _format_duration(summary.twitter_duration_seconds)],
+        ["Duration: total", _format_duration(summary.total_duration_seconds)],
     ]
     print(tabulate(rows, headers=["Metric", "Value"], tablefmt="fancy_grid"))
 
+    # Breakdown of failures/skips by source type
     source_results = summary.source_results or []
+    if source_results:
+        type_stats: dict[str, dict[str, int]] = {}
+        for r in source_results:
+            st = r.source_type
+            if st not in type_stats:
+                type_stats[st] = {"succeeded": 0, "failed": 0, "skipped": 0}
+            if r.status == "success":
+                type_stats[st]["succeeded"] += 1
+            elif r.status == "failed":
+                type_stats[st]["failed"] += 1
+            else:
+                type_stats[st]["skipped"] += 1
+        breakdown_rows = [[st, stats["succeeded"], stats["failed"], stats["skipped"]] for st, stats in sorted(type_stats.items())]
+        print()
+        print(tabulate(breakdown_rows, headers=["Source type", "Succeeded", "Failed", "Skipped"], tablefmt="fancy_grid"))
+
     if not source_results:
         return
 

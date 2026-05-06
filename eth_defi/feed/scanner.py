@@ -8,6 +8,7 @@ without going through the script entry point.
 import datetime
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -196,6 +197,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
     db = VaultPostDatabase(config.db_path)
     combined_summary = CollectorRunSummary(source_results=[], feeders_skipped=feeders_skipped)
     twitter_collection_used_list_timeline = False
+    total_start = time.monotonic()
 
     try:
         # Phase 1: RSS sources
@@ -204,6 +206,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
         # 429 Too Many Requests across the batch.
         if rss_sources:
             logger.info("Scanning %d RSS sources", len(rss_sources))
+            rss_start = time.monotonic()
             rss_summary = collect_posts(
                 db,
                 rss_sources,
@@ -215,6 +218,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                 max_proxy_rotations=config.max_proxy_rotations,
                 label="RSS",
             )
+            combined_summary.rss_duration_seconds = time.monotonic() - rss_start
             _merge_summary(combined_summary, rss_summary)
             _record_rss_failures(rss_summary, rss_sources)
             _detect_dead_rss_feeds(db, rss_sources)
@@ -222,6 +226,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
         # Phase 2: LinkedIn sources
         if linkedin_sources:
             logger.info("Scanning %d LinkedIn sources", len(linkedin_sources))
+            linkedin_start = time.monotonic()
             linkedin_summary = collect_posts(
                 db,
                 linkedin_sources,
@@ -233,6 +238,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                 max_proxy_rotations=config.max_proxy_rotations,
                 label="LinkedIn",
             )
+            combined_summary.linkedin_duration_seconds = time.monotonic() - linkedin_start
             _merge_summary(combined_summary, linkedin_summary)
 
             today_str = native_datetime_utc_now().strftime("%Y-%m-%d")
@@ -241,6 +247,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
         # Phase 3: Twitter sources
         if twitter_sources:
             logger.info("Scanning %d Twitter sources", len(twitter_sources))
+            twitter_start = time.monotonic()
             if config.use_x_list_timeline and config.twitter_bearer_token and twitter_user_cache and resolved_x_list_id:
                 logger.info("Collecting Twitter posts through X list timeline %s", resolved_x_list_id)
                 try:
@@ -253,6 +260,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                         max_tweets=max(100, config.max_posts_per_source * len(twitter_sources)),
                     )
                     twitter_collection_used_list_timeline = True
+                    combined_summary.twitter_method = "list"
                 except XApiError as e:
                     logger.warning(
                         "X list timeline collection failed for list %s, falling back to per-source Twitter collection: %s",
@@ -273,6 +281,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                         twitter_user_cache=twitter_user_cache,
                         label="Twitter",
                     )
+                    combined_summary.twitter_method = "rss-bridge"
             else:
                 twitter_summary = collect_posts(
                     db,
@@ -288,6 +297,8 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
                     twitter_user_cache=twitter_user_cache,
                     label="Twitter",
                 )
+                combined_summary.twitter_method = "rss-bridge"
+            combined_summary.twitter_duration_seconds = time.monotonic() - twitter_start
             _merge_summary(combined_summary, twitter_summary)
 
         # Detect dead Twitter accounts
@@ -304,6 +315,7 @@ def run_post_scan_cycle(config: PostScanConfig) -> CollectorRunSummary:
     finally:
         db.close()
 
+    combined_summary.total_duration_seconds = time.monotonic() - total_start
     return combined_summary
 
 

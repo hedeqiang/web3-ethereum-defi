@@ -109,6 +109,16 @@ class CollectorRunSummary:
     posts_inserted: int = 0
     #: Per-source collection results for dashboard rendering.
     source_results: list["CollectedSourceResult"] | None = None
+    #: Twitter collection method used: "list", "rss-bridge", or None if no Twitter sources.
+    twitter_method: str | None = None
+    #: Duration of the RSS phase in seconds.
+    rss_duration_seconds: float | None = None
+    #: Duration of the LinkedIn phase in seconds.
+    linkedin_duration_seconds: float | None = None
+    #: Duration of the Twitter phase in seconds.
+    twitter_duration_seconds: float | None = None
+    #: Total scan duration in seconds.
+    total_duration_seconds: float | None = None
 
 
 @dataclass(slots=True)
