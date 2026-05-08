@@ -410,6 +410,8 @@ VAULT_FLAGS_AND_NOTES: dict[str, tuple[VaultFlag | None, str]] = {
     "0xe0345f66318f482acccd67244a921c7fdc410957": (VaultFlag.illiquid, XUSD_MESSAGE),
     # Peapods Interest Bearing USDC - 22 (Arbitrum)
     "0x0319c82013cf676661f7bde576c6731869a93fc0": (VaultFlag.illiquid, PEAPODS_ILLIQUID),
+    # Peapods Interest Bearing USDC - 38 (Sonic)
+    "0x87caed1e19da46098e710b69cae33e74c146bacd": (VaultFlag.illiquid, PEAPODS_ILLIQUID),
     # Curve Boosted crvUSD-fxSAVE Lender (Yearn on Ethereum)
     "0x5103d3ee6d599984609daaadd3a439152cc0c392": (VaultFlag.subvault, SUBVAULT),
     # Grvt Liquidity Provider (GLP)
