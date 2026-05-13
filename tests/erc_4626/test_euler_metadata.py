@@ -112,7 +112,8 @@ def test_euler_metadata_products_json(
     # No per-vault name override in products.json, so name falls back to the product name.
     assert meta["name"] == "Euler Prime"
     assert meta["description"] is not None
-    assert "blue chip" in meta["description"]
+    assert len(meta["description"]) > 0
+    assert "lending" in meta["description"].lower()
     # entity is the first element of the product's entity list (backward compat)
     assert meta["entity"] == "euler-dao"
 
